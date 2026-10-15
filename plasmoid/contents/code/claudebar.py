@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Emit one JSON line with herdr agent counts and Claude rate limits."""
+
 import json
 import os
 import subprocess
@@ -10,28 +11,63 @@ STALE_AFTER = 15 * 60
 HERDR = os.path.expanduser("~/.local/bin/herdr")
 
 
+def herdr(*args):
+    out = subprocess.run(
+        [HERDR, *args], check=False, capture_output=True, text=True, timeout=3
+    )
+    return json.loads(out.stdout)["result"]
+
+
+def labels():
+    try:
+        workspaces = {
+            w["workspace_id"]: w.get("label") or ""
+            for w in herdr("workspace", "list")["workspaces"]
+        }
+        tabs = herdr("tab", "list")["tabs"]
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        return {}, {}
+    named_tabs = {
+        t["tab_id"]: t["label"]
+        for t in tabs
+        if t.get("label") and not str(t["label"]).isdigit()
+    }
+    return workspaces, named_tabs
+
+
 def agents():
     try:
-        out = subprocess.run(
-            [HERDR, "agent", "list"], check=False, capture_output=True, text=True, timeout=3
-        )
-        listed = json.loads(out.stdout)["result"]["agents"]
+        listed = herdr("agent", "list")["agents"]
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
         return None
-    counts = {"working": 0, "blocked": 0, "idle": 0, "list": []}
+    workspaces, named_tabs = labels()
+    counts = {"working": 0, "blocked": 0, "idle": 0}
+    rows = []
     for agent in listed:
         status = agent.get("agent_status")
         if status in counts:
             counts[status] += 1
-        counts["list"].append({
-            "status": status,
-            "cwd": agent.get("cwd") or "",
-            "terminal_id": agent.get("terminal_id"),
-            "focused": agent.get("focused", False),
-        })
+        rows.append(
+            {
+                "status": status,
+                "cwd": agent.get("cwd") or "",
+                "name": " · ".join(
+                    part
+                    for part in (
+                        workspaces.get(agent.get("workspace_id")),
+                        named_tabs.get(agent.get("tab_id")),
+                    )
+                    if part
+                ),
+                "terminal_id": agent.get("terminal_id"),
+                "focused": agent.get("focused", False),
+            }
+        )
     order = {"blocked": 0, "working": 1}
-    counts["list"].sort(key=lambda a: (order.get(a["status"], 2), a["cwd"]))
-    return counts
+    rows.sort(
+        key=lambda a: (order.get(a["status"], 2), (a["name"] or a["cwd"]).lower())
+    )
+    return {**counts, "list": rows}
 
 
 def window(rate_limits, key):

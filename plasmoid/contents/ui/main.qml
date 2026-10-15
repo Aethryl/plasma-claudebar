@@ -554,14 +554,14 @@ PlasmoidItem {
                 pulse: agentRow.agent.status === "working"
             }
             PlasmaComponents.Label {
-                text: root.project(agentRow.agent.cwd)
+                text: agentRow.agent.name || root.project(agentRow.agent.cwd)
                 font.weight: agentRow.agent.focused ? Font.DemiBold : Font.Normal
                 elide: Text.ElideRight
                 Layout.maximumWidth: agentRow.width * 0.6
             }
             PlasmaComponents.Label {
                 Layout.fillWidth: true
-                text: root.parentPath(agentRow.agent.cwd)
+                text: agentRow.agent.name ? root.shortPath(agentRow.agent.cwd) : root.parentPath(agentRow.agent.cwd)
                 color: root.dim
                 elide: Text.ElideLeft
                 horizontalAlignment: Text.AlignRight
