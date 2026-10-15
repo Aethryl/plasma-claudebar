@@ -278,6 +278,15 @@ PlasmoidItem {
         }
     }
 
+    component Pip: Rectangle {
+        readonly property real dpr: Screen.devicePixelRatio || 1
+        readonly property real size: Math.max(2, Math.round(Kirigami.Units.gridUnit * 0.2 * dpr)) / dpr
+        Layout.preferredWidth: size
+        Layout.preferredHeight: size
+        Layout.alignment: Qt.AlignVCenter
+        color: Qt.alpha(Kirigami.Theme.textColor, 0.3)
+    }
+
     component Dot: Rectangle {
         property color dotColor
         property bool pulse: false
@@ -610,9 +619,9 @@ PlasmoidItem {
                     Count { dotColor: root.blocked; pulse: !!root.agents && root.agents.blocked > 0; value: root.agents ? root.agents.blocked : null }
                     Count { dotColor: root.dim; value: root.agents ? root.agents.idle : null }
                 }
-                Rectangle { Layout.preferredWidth: 1; Layout.preferredHeight: row.height * 0.7; color: root.dim }
+                Pip {}
                 Meter { label: "5h"; win: root.bar ? root.bar.five_hour : null }
-                Rectangle { Layout.preferredWidth: 1; Layout.preferredHeight: row.height * 0.7; color: root.dim }
+                Pip {}
                 Meter { label: "7d"; win: root.bar ? root.bar.seven_day : null }
             }
         }
