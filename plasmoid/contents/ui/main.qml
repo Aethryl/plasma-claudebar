@@ -132,6 +132,152 @@ PlasmoidItem {
         return model.replace(/^claude-/, "").replace(/-\d{8}$/, "").replace(/-(\d+)-(\d+)$/, " $1.$2").replace(/-(\d+)$/, " $1")
     }
 
+    Plasmoid.contextualActions: [
+        PlasmaCore.Action {
+            text: "Playful Claude"
+            checkable: true
+            checked: Plasmoid.configuration.liveliness === "playful"
+            onTriggered: Plasmoid.configuration.liveliness = checked ? "playful" : "subtle"
+        }
+    ]
+
+    component Clawd: Item {
+        id: clawd
+        readonly property real dpr: Screen.devicePixelRatio || 1
+        readonly property int dot: Math.max(1, Math.round(Kirigami.Units.gridUnit * 0.7 * dpr / 12))
+        readonly property real px: dot / dpr
+        readonly property bool playful: Plasmoid.configuration.liveliness === "playful"
+        readonly property bool still: Kirigami.Units.longDuration === 0
+        readonly property int working: root.agents ? root.agents.working : 0
+        readonly property int waiting: root.agents ? root.agents.blocked : 0
+        readonly property var frames: ({
+            walk: ["clawd-walk-a", "clawd-walk-b"],
+            type: ["clawd-type-a", "clawd-type-b"],
+            hop: ["clawd", "clawd-walk-b", "clawd", "clawd-walk-a"],
+            scan: ["clawd-look-l", "clawd-look-l", "clawd-walk-b", "clawd-look-r", "clawd-look-r", "clawd-walk-a"],
+            turn: ["clawd-walk-a", "clawd-walk-b", "clawd-walk-a", "clawd-walk-b"],
+            wave: ["clawd-wave-up", "clawd-wave-mid"],
+            dance: ["clawd-cheer", "clawd"],
+            lookaround: ["clawd-look-l", "clawd-look-l", "clawd", "clawd-look-r", "clawd-look-r", "clawd"],
+            stretch: ["clawd-cheer", "clawd-cheer", "clawd-cheer", "clawd"]
+        })
+        readonly property var names: ["clawd", "clawd-blink", "clawd-walk-a", "clawd-walk-b", "clawd-type-a", "clawd-type-b", "clawd-wave-up", "clawd-wave-mid", "clawd-cheer", "clawd-look-l", "clawd-look-r"]
+        readonly property var routines: ["walk", "type", "hop", "scan", "turn"]
+        property string routine: "walk"
+        property bool flipped: false
+        property bool dancing: false
+        property bool blinking: false
+        property string fidget: ""
+        property int step: 0
+        property int lastWorking: 0
+        readonly property string mood: dancing ? "dance" : waiting > 0 ? "wave" : working > 0 ? "work" : "idle"
+        readonly property string act: mood === "work" ? routine : mood
+        readonly property string frame: still ? "clawd"
+            : mood !== "idle" ? frames[act][step % frames[act].length]
+            : fidget !== "" ? frames[fidget][Math.min(step, frames[fidget].length - 1)]
+            : blinking ? "clawd-blink" : "clawd"
+        readonly property real lift: still ? 0
+            : act === "dance" && step % 2 === 0 ? px * 2
+            : act === "hop" && step % 4 === 1 ? px * 2
+            : act === "hop" && step % 4 === 3 ? px
+            : (act === "walk" || act === "turn") && step % 2 === 1 ? px
+            : 0
+
+        Layout.preferredWidth: px * 18
+        Layout.preferredHeight: px * 12
+
+        onMoodChanged: {
+            step = 0
+            flipped = false
+        }
+        onWorkingChanged: {
+            if (lastWorking > 0 && working === 0 && waiting === 0 && !still) {
+                step = 0
+                dancing = true
+                danceEnd.restart()
+            }
+            lastWorking = working
+        }
+
+        Repeater {
+            model: clawd.names
+            Image {
+                required property string modelData
+                y: -clawd.lift
+                width: clawd.width
+                height: clawd.height
+                visible: modelData === clawd.frame
+                mirror: clawd.flipped
+                source: Qt.resolvedUrl("../images/" + modelData + ".svg")
+                sourceSize: Qt.size(clawd.width, clawd.height)
+                smooth: false
+            }
+        }
+
+        Timer {
+            interval: clawd.playful ? 170 : 340
+            running: !clawd.still && clawd.visible && (clawd.mood !== "idle" || clawd.fidget !== "")
+            repeat: true
+            onTriggered: {
+                clawd.step += 1
+                if (clawd.act === "turn" && clawd.step % 4 === 0)
+                    clawd.flipped = !clawd.flipped
+                if (clawd.mood === "idle" && clawd.fidget !== "" && clawd.step >= clawd.frames[clawd.fidget].length) {
+                    clawd.fidget = ""
+                    clawd.step = 0
+                }
+            }
+        }
+        Timer {
+            id: danceEnd
+            interval: 2400
+            onTriggered: clawd.dancing = false
+        }
+        Timer {
+            interval: 4000
+            running: !clawd.still && clawd.visible && clawd.mood === "idle" && clawd.fidget === ""
+            repeat: true
+            onTriggered: {
+                interval = 4000 + Math.random() * 3000
+                clawd.blinking = true
+                unblink.restart()
+            }
+        }
+        Timer {
+            id: unblink
+            interval: 150
+            onTriggered: clawd.blinking = false
+        }
+        Timer {
+            interval: 25000
+            running: clawd.playful && !clawd.still && clawd.visible && clawd.mood === "idle"
+            repeat: true
+            onTriggered: {
+                interval = 20000 + Math.random() * 20000
+                clawd.step = 0
+                clawd.fidget = Math.random() < 0.6 ? "lookaround" : "stretch"
+            }
+        }
+        Timer {
+            interval: 9000
+            running: !clawd.still && clawd.visible && clawd.mood === "work"
+            repeat: true
+            onTriggered: {
+                interval = (clawd.playful ? 5000 : 9000) + Math.random() * 6000
+                const others = clawd.routines.filter(r => r !== clawd.routine)
+                clawd.routine = others[Math.floor(Math.random() * others.length)]
+                clawd.step = 0
+                clawd.flipped = false
+            }
+        }
+        HoverHandler { id: clawdHover }
+        PlasmaComponents.ToolTip {
+            visible: clawdHover.hovered
+            delay: Kirigami.Units.toolTipDelay
+            text: ({ idle: "Claude is idle", work: "Claude is working", wave: "Claude needs you", dance: "All done!" })[clawd.mood]
+        }
+    }
+
     component Dot: Rectangle {
         property color dotColor
         property bool pulse: false
@@ -456,15 +602,7 @@ PlasmoidItem {
                 anchors.centerIn: parent
                 spacing: Kirigami.Units.largeSpacing
 
-                Image {
-                    readonly property real dpr: Screen.devicePixelRatio || 1
-                    readonly property int dot: Math.max(1, Math.round(Kirigami.Units.gridUnit * 0.7 * dpr / 12))
-                    Layout.preferredHeight: dot * 12 / dpr
-                    Layout.preferredWidth: dot * 18 / dpr
-                    source: Qt.resolvedUrl("../images/clawd.svg")
-                    sourceSize: Qt.size(Layout.preferredWidth, Layout.preferredHeight)
-                    smooth: false
-                }
+                Clawd {}
 
                 RowLayout {
                     spacing: Kirigami.Units.smallSpacing * 2
