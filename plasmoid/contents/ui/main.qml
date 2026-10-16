@@ -390,9 +390,9 @@ PlasmoidItem {
     component Dot: Rectangle {
         property color dotColor
         property bool pulse: false
-        implicitWidth: Kirigami.Units.smallSpacing * 2
+        readonly property real dpr: Screen.devicePixelRatio || 1
+        implicitWidth: Math.round(Kirigami.Units.smallSpacing * 1.75 * dpr) / dpr
         implicitHeight: implicitWidth
-        radius: width / 2
         color: dotColor
         SequentialAnimation on opacity {
             running: pulse
@@ -660,7 +660,7 @@ PlasmoidItem {
             spacing: Kirigami.Units.smallSpacing * 2
 
             Dot {
-                dotColor: root.statusColor(agentRow.agent.status)
+                dotColor: root.levelColor(root.ctxLevel(agentRow.agent.ctx), root.statusColor(agentRow.agent.status))
                 pulse: agentRow.agent.status === "working"
             }
             PlasmaComponents.Label {
