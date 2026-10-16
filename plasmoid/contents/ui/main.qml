@@ -289,13 +289,27 @@ PlasmoidItem {
             : mood !== "idle" ? frames[act][step % frames[act].length]
             : fidget !== "" ? frames[fidget][Math.min(step, frames[fidget].length - 1)]
             : blinking ? "clawd-blink" : "clawd"
-        readonly property real lift: still ? 0
+        readonly property real lift: still || jump > 0 ? 0
             : moving ? stride * px
-            : act === "dance" && step % 2 === 0 ? px * 2
-            : act === "hop" && step % 4 === 1 ? px * 2
-            : act === "hop" && step % 4 === 3 ? px
             : (act === "walk" || act === "turn") && step % 2 === 1 ? px
             : 0
+        readonly property real barTop: 3
+        property real jump: 0
+        property real jumpHeight: 0
+
+        function leap(share) {
+            const headroom = mapToItem(null, 0, 0).y + px * 2 - barTop - px * 3
+            if (still || leaping.running || headroom < px * 2)
+                return
+            jumpHeight = Math.round(headroom * share * dpr) / dpr
+            leaping.restart()
+        }
+
+        SequentialAnimation {
+            id: leaping
+            NumberAnimation { target: clawd; property: "jump"; to: clawd.jumpHeight; duration: 150 + clawd.jumpHeight * 8; easing.type: Easing.OutQuad }
+            NumberAnimation { target: clawd; property: "jump"; to: 0; duration: 150 + clawd.jumpHeight * 8; easing.type: Easing.InQuad }
+        }
 
         width: px * 18
         height: px * 12
@@ -353,7 +367,7 @@ PlasmoidItem {
             Image {
                 required property string modelData
                 x: clawd.shiver
-                y: -clawd.lift
+                y: -clawd.lift - Math.round(clawd.jump * clawd.dpr) / clawd.dpr
                 width: clawd.width
                 height: clawd.height
                 visible: modelData === clawd.frame
@@ -370,6 +384,10 @@ PlasmoidItem {
             repeat: true
             onTriggered: {
                 clawd.step += 1
+                if (clawd.act === "hop" && clawd.step % 4 === 1)
+                    clawd.leap(0.7)
+                if (clawd.act === "dance" && clawd.step % 2 === 0)
+                    clawd.leap(1)
                 if (clawd.act === "turn" && clawd.step % 4 === 0)
                     clawd.flipped = !clawd.flipped
                 if (clawd.mood === "idle" && clawd.fidget !== "" && clawd.step >= clawd.frames[clawd.fidget].length) {
@@ -386,6 +404,8 @@ PlasmoidItem {
                 const left = clawd.target - clawd.pos
                 clawd.pos += Math.sign(left) * Math.min(Math.abs(left), clawd.px * 2)
                 clawd.tick += 1
+                if (clawd.tick % 12 === 0 && Math.random() < (clawd.playful ? 0.35 : 0.15))
+                    clawd.leap(0.5)
             }
         }
         Timer {
