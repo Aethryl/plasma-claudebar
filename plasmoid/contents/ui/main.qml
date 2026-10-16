@@ -270,15 +270,16 @@ PlasmoidItem {
         property int lastWorking: 0
         property real homeX: 0
         property real minX: 0
+        property real originX: 0
         property real wander: -1
         property bool settled: false
         property real pos: 0
         property int tick: 0
         readonly property bool roams: !still && homeX - minX > width * 2
         readonly property bool roaming: mood === "work" || (mood === "idle" && playful)
-        readonly property real target: roams && roaming && wander >= 0 ? Math.max(minX, Math.min(wander, homeX)) : homeX
+        readonly property real target: roams && wander >= 0 ? Math.max(minX, Math.min(wander, homeX)) : homeX
         readonly property bool moving: settled && Math.abs(pos - target) > 0.01
-        readonly property bool heading: target < pos
+        property bool heading: false
         readonly property int stride: Math.floor(tick / 3) % 2
         readonly property string mood: dancing ? "dance" : waiting > 0 ? "wave" : root.hotLevel !== "" ? "alarm" : working > 0 ? "work" : "idle"
         readonly property string act: mood === "work" ? routine : mood
@@ -298,22 +299,45 @@ PlasmoidItem {
 
         width: px * 18
         height: px * 12
-        x: Math.round(pos * dpr) / dpr
-        onHomeXChanged: if (!settled || (wander < 0 && !moving)) pos = homeX
+        x: Math.round((pos - originX) * dpr) / dpr
+        property real lastHome: 0
+        onHomeXChanged: {
+            if (!settled || (wander < 0 && Math.abs(pos - lastHome) < 0.5))
+                pos = homeX
+            lastHome = homeX
+        }
         Component.onCompleted: Qt.callLater(() => {
             clawd.pos = clawd.target
+            clawd.lastHome = clawd.homeX
             clawd.settled = true
         })
 
+        function walkTo(spot) {
+            if (moving)
+                return
+            const next = spot < 0 ? homeX : Math.max(minX, Math.min(spot, homeX))
+            if (Math.abs(next - pos) < width)
+                return
+            heading = next < pos
+            wander = spot
+        }
+
         function pickSpot() {
-            wander = minX + Math.random() * Math.max(0, homeX - minX)
+            walkTo(minX + Math.random() * Math.max(0, homeX - minX))
+        }
+
+        function goHome() {
+            if (wander < 0)
+                return
+            heading = homeX < pos
+            wander = -1
         }
 
         onMoodChanged: {
             step = 0
             flipped = false
-            if (mood !== "work")
-                wander = -1
+            if (!roaming)
+                homeCall.restart()
         }
         onWorkingChanged: {
             if (lastWorking > 0 && working === 0 && waiting === 0 && !still) {
@@ -367,7 +391,12 @@ PlasmoidItem {
         Timer {
             id: strollBack
             interval: 12000
-            onTriggered: if (clawd.mood === "idle") clawd.wander = -1
+            onTriggered: if (clawd.mood === "idle") clawd.goHome()
+        }
+        Timer {
+            id: homeCall
+            interval: 6000
+            onTriggered: if (!clawd.roaming) clawd.goHome()
         }
         Timer {
             id: danceEnd
@@ -396,7 +425,7 @@ PlasmoidItem {
             onTriggered: {
                 interval = 20000 + Math.random() * 20000
                 clawd.step = 0
-                if (clawd.roams && clawd.wander < 0 && Math.random() < 0.5) {
+                if (clawd.roams && clawd.wander < 0 && !clawd.moving && Math.random() < 0.5) {
                     clawd.pickSpot()
                     strollBack.restart()
                     return
@@ -414,8 +443,8 @@ PlasmoidItem {
                 clawd.routine = others[Math.floor(Math.random() * others.length)]
                 clawd.step = 0
                 clawd.flipped = false
-                if (clawd.roams)
-                    Math.random() < 0.3 ? clawd.wander = -1 : clawd.pickSpot()
+                if (clawd.roams && !clawd.moving)
+                    Math.random() < 0.3 ? clawd.goHome() : clawd.pickSpot()
             }
         }
         HoverHandler { id: clawdHover }
@@ -792,8 +821,9 @@ PlasmoidItem {
 
         Clawd {
             id: sprite
-            homeX: area.x + row.x + home.x
-            minX: Kirigami.Units.largeSpacing
+            originX: holder.globalX
+            homeX: holder.globalX + area.x + row.x + home.x
+            minX: holder.globalX + Kirigami.Units.largeSpacing
             y: Math.round((holder.height - height) / 2)
             TapHandler { onTapped: root.drooped = !root.drooped }
         }
