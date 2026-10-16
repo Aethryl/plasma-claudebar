@@ -4,6 +4,7 @@
 from pathlib import Path
 
 COLOR = "#D97757"
+DROP = "#7FBBB3"
 HERE = Path(__file__).resolve().parent
 
 BODY = [
@@ -54,26 +55,39 @@ FRAMES = {
     ),
     "clawd-look-l": frame(r2="...#.######.###..."),
     "clawd-look-r": frame(r2="...###.######.#..."),
+    "clawd-sweat-a": frame(
+        r0="................~.",
+        r1="...############.~~",
+    ),
+    "clawd-sweat-b": frame(
+        r1="...############.~.",
+        r2="...##.######.##.~~",
+    ),
 }
 
 
-def svg(grid: list[str]) -> str:
-    runs = []
+def runs(grid: list[str], mark: str) -> str:
+    out = []
     for y, row in enumerate(grid):
         x = 0
         while x < len(row):
-            if row[x] == "#":
+            if row[x] == mark:
                 start = x
-                while x < len(row) and row[x] == "#":
+                while x < len(row) and row[x] == mark:
                     x += 1
                 width = x - start
-                runs.append(f"M{start} {y * 2}h{width}v2h-{width}z")
+                out.append(f"M{start} {y * 2}h{width}v2h-{width}z")
             else:
                 x += 1
-    width = len(grid[0])
+    return "".join(out)
+
+
+def svg(grid: list[str]) -> str:
+    drop = runs(grid, "~")
+    extra = f'<path fill="{DROP}" d="{drop}"/>' if drop else ""
     return (
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {len(grid) * 2}">'
-        f'<path fill="{COLOR}" d="{"".join(runs)}"/></svg>\n'
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {len(grid[0])} {len(grid) * 2}">'
+        f'<path fill="{COLOR}" d="{runs(grid, "#")}"/>{extra}</svg>\n'
     )
 
 

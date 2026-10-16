@@ -7,6 +7,7 @@ import org.kde.plasma.plasmoid
 import org.kde.plasma.components as PlasmaComponents
 import org.kde.kirigami as Kirigami
 import org.kde.plasma.plasma5support as P5Support
+import org.kde.notification
 
 PlasmoidItem {
     id: root
@@ -28,20 +29,83 @@ PlasmoidItem {
     readonly property var agents: bar && bar.agents ? bar.agents : null
     readonly property var activeAgents: agents ? agents.list.filter(a => a.status !== "idle") : []
     readonly property var idleAgents: agents ? agents.list.filter(a => a.status === "idle") : []
+    readonly property bool windowed: Plasmoid.formFactor === PlasmaCore.Types.Planar || Plasmoid.location === PlasmaCore.Types.Floating
+    property var pendingSettings: ({})
+    readonly property var settings: Object.assign({ warn: 70, critical: 85, notify: true, playful: false }, bar && bar.settings ? bar.settings : {}, pendingSettings)
+    readonly property string hotLevel: agents ? agents.list.reduce((worst, a) => {
+        const level = ctxLevel(a.ctx)
+        return level === "crit" || worst === "crit" ? "crit" : level || worst
+    }, "") : ""
+    property var notified: ({})
 
     readonly property color ok: Kirigami.Theme.positiveTextColor
     readonly property color warning: Kirigami.Theme.neutralTextColor
     readonly property color critical: Kirigami.Theme.negativeTextColor
     readonly property color blocked: Kirigami.Theme.neutralTextColor
     readonly property color dim: Kirigami.Theme.disabledTextColor
+    readonly property color ctxWarn: Qt.tint(Kirigami.Theme.neutralTextColor, Qt.alpha(Kirigami.Theme.negativeTextColor, 0.45))
     readonly property color hairline: Qt.alpha(Kirigami.Theme.textColor, 0.1)
 
-    preferredRepresentation: compactRepresentation
-    fullRepresentation: Item {}
-    Plasmoid.backgroundHints: "NoBackground"
+    preferredRepresentation: windowed ? fullRepresentation : compactRepresentation
+    fullRepresentation: Settings {
+        app: root
+    }
+    Plasmoid.backgroundHints: windowed ? PlasmaCore.Types.DefaultBackground : PlasmaCore.Types.NoBackground
 
     function pctColor(pct) {
         return pct >= 85 ? critical : pct >= 60 ? warning : ok
+    }
+
+    function ctxLevel(pct) {
+        if (pct === null || pct === undefined)
+            return ""
+        return pct >= settings.critical ? "crit" : pct >= settings.warn ? "warn" : ""
+    }
+
+    function levelColor(level, fallback) {
+        return level === "crit" ? critical : level === "warn" ? ctxWarn : fallback
+    }
+
+    function levelsFor(status) {
+        if (!agents)
+            return []
+        return agents.list.filter(a => a.status === status)
+            .map(a => a.ctx === null || a.ctx === undefined ? -1 : a.ctx)
+            .sort((a, b) => b - a)
+            .map(ctxLevel)
+    }
+
+    function saveSetting(key, value) {
+        const next = Object.assign({}, pendingSettings)
+        next[key] = value
+        pendingSettings = next
+        executable.connectSource(command + " set " + key + " '" + JSON.stringify(value) + "' #set")
+    }
+
+    function openSettings() {
+        root.drooped = false
+        executable.connectSource("setsid -f plasmawindowed io.github.aethryl.claudebar >/dev/null 2>&1")
+    }
+
+    function checkAlerts() {
+        if (windowed || !agents)
+            return
+        const next = {}
+        for (const agent of agents.list) {
+            const key = String(agent.terminal_id)
+            const level = ctxLevel(agent.ctx)
+            if (level === "crit") {
+                next[key] = true
+                if (!notified[key] && settings.notify)
+                    alert.createObject(root, {
+                        title: "Context " + Math.round(agent.ctx) + "% · " + (agent.name || project(agent.cwd)),
+                        terminal: key,
+                    }).sendEvent()
+            } else if (level === "warn" && notified[key]) {
+                next[key] = true
+            }
+        }
+        notified = next
     }
 
     function statusColor(status) {
@@ -97,12 +161,18 @@ PlasmoidItem {
                 } catch (e) {}
                 return
             }
+            if (source.endsWith(" #set")) {
+                connectSource(root.command)
+                return
+            }
             if (source !== root.command)
                 return
             try {
                 root.bar = JSON.parse(data["stdout"])
+                root.pendingSettings = {}
             } catch (e) {}
             root.now = Date.now() / 1000
+            root.checkAlerts()
         }
     }
 
@@ -132,12 +202,39 @@ PlasmoidItem {
         return model.replace(/^claude-/, "").replace(/-\d{8}$/, "").replace(/-(\d+)-(\d+)$/, " $1.$2").replace(/-(\d+)$/, " $1")
     }
 
+    Component {
+        id: alert
+        Notification {
+            id: note
+            property string terminal
+            componentName: "plasma_workspace"
+            eventId: "notification"
+            iconName: "dialog-warning"
+            text: "Auto-compact is close."
+            urgency: Notification.HighUrgency
+            defaultAction: NotificationAction {
+                onActivated: root.focusAgent(note.terminal)
+            }
+            actions: [
+                NotificationAction {
+                    label: "Focus"
+                    onActivated: root.focusAgent(note.terminal)
+                }
+            ]
+        }
+    }
+
     Plasmoid.contextualActions: [
         PlasmaCore.Action {
             text: "Playful Claude"
             checkable: true
-            checked: Plasmoid.configuration.liveliness === "playful"
-            onTriggered: Plasmoid.configuration.liveliness = checked ? "playful" : "subtle"
+            checked: root.settings.playful
+            onTriggered: root.saveSetting("playful", checked)
+        },
+        PlasmaCore.Action {
+            text: "Settings…"
+            icon.name: "configure"
+            onTriggered: root.openSettings()
         }
     ]
 
@@ -146,7 +243,7 @@ PlasmoidItem {
         readonly property real dpr: Screen.devicePixelRatio || 1
         readonly property int dot: Math.max(1, Math.round(Kirigami.Units.gridUnit * 0.7 * dpr / 12))
         readonly property real px: dot / dpr
-        readonly property bool playful: Plasmoid.configuration.liveliness === "playful"
+        readonly property bool playful: root.settings.playful
         readonly property bool still: Kirigami.Units.longDuration === 0
         readonly property int working: root.agents ? root.agents.working : 0
         readonly property int waiting: root.agents ? root.agents.blocked : 0
@@ -159,9 +256,10 @@ PlasmoidItem {
             wave: ["clawd-wave-up", "clawd-wave-mid"],
             dance: ["clawd-cheer", "clawd"],
             lookaround: ["clawd-look-l", "clawd-look-l", "clawd", "clawd-look-r", "clawd-look-r", "clawd"],
-            stretch: ["clawd-cheer", "clawd-cheer", "clawd-cheer", "clawd"]
+            stretch: ["clawd-cheer", "clawd-cheer", "clawd-cheer", "clawd"],
+            alarm: ["clawd-sweat-a", "clawd-sweat-b"]
         })
-        readonly property var names: ["clawd", "clawd-blink", "clawd-walk-a", "clawd-walk-b", "clawd-type-a", "clawd-type-b", "clawd-wave-up", "clawd-wave-mid", "clawd-cheer", "clawd-look-l", "clawd-look-r"]
+        readonly property var names: ["clawd", "clawd-blink", "clawd-walk-a", "clawd-walk-b", "clawd-type-a", "clawd-type-b", "clawd-wave-up", "clawd-wave-mid", "clawd-cheer", "clawd-look-l", "clawd-look-r", "clawd-sweat-a", "clawd-sweat-b"]
         readonly property var routines: ["walk", "type", "hop", "scan", "turn"]
         property string routine: "walk"
         property bool flipped: false
@@ -170,9 +268,10 @@ PlasmoidItem {
         property string fidget: ""
         property int step: 0
         property int lastWorking: 0
-        readonly property string mood: dancing ? "dance" : waiting > 0 ? "wave" : working > 0 ? "work" : "idle"
+        readonly property string mood: dancing ? "dance" : waiting > 0 ? "wave" : root.hotLevel !== "" ? "alarm" : working > 0 ? "work" : "idle"
         readonly property string act: mood === "work" ? routine : mood
-        readonly property string frame: still ? "clawd"
+        readonly property real shiver: !still && mood === "alarm" && root.hotLevel === "crit" && step % 2 === 1 ? px : 0
+        readonly property string frame: still ? (mood === "alarm" ? "clawd-sweat-a" : "clawd")
             : mood !== "idle" ? frames[act][step % frames[act].length]
             : fidget !== "" ? frames[fidget][Math.min(step, frames[fidget].length - 1)]
             : blinking ? "clawd-blink" : "clawd"
@@ -203,6 +302,7 @@ PlasmoidItem {
             model: clawd.names
             Image {
                 required property string modelData
+                x: clawd.shiver
                 y: -clawd.lift
                 width: clawd.width
                 height: clawd.height
@@ -274,7 +374,7 @@ PlasmoidItem {
         PlasmaComponents.ToolTip {
             visible: clawdHover.hovered
             delay: Kirigami.Units.toolTipDelay
-            text: ({ idle: "Claude is idle", work: "Claude is working", wave: "Claude needs you", dance: "All done!" })[clawd.mood]
+            text: ({ idle: "Claude is idle", work: "Claude is working", wave: "Claude needs you", dance: "All done!", alarm: "An agent's context is filling up" })[clawd.mood]
         }
     }
 
@@ -306,6 +406,7 @@ PlasmoidItem {
         id: count
         property color dotColor
         property var value
+        property var levels: []
         property bool pulse: false
         spacing: Kirigami.Units.smallSpacing / 2
         Item {
@@ -332,7 +433,7 @@ PlasmoidItem {
                         readonly property bool on: slot < stack.filled
                         width: stack.cell
                         height: stack.cell
-                        color: on ? count.dotColor : Qt.alpha(count.dotColor, 0.18)
+                        color: on ? root.levelColor(count.levels[slot] || "", count.dotColor) : Qt.alpha(count.dotColor, 0.18)
                         opacity: on && stack.beating ? pulseLevel.value : 1
                     }
                 }
@@ -576,6 +677,17 @@ PlasmoidItem {
                 horizontalAlignment: Text.AlignRight
                 font.pointSize: Kirigami.Theme.smallFont.pointSize
             }
+            PlasmaComponents.Label {
+                readonly property string level: root.ctxLevel(agentRow.agent.ctx)
+                visible: agentRow.agent.ctx !== null && agentRow.agent.ctx !== undefined
+                text: Math.round(agentRow.agent.ctx) + "%"
+                color: root.levelColor(level, root.dim)
+                font.family: "monospace"
+                font.weight: level ? Font.DemiBold : Font.Normal
+                font.pointSize: Kirigami.Theme.smallFont.pointSize
+                horizontalAlignment: Text.AlignRight
+                Layout.minimumWidth: Kirigami.Units.gridUnit * 1.8
+            }
         }
 
         MouseArea {
@@ -615,9 +727,9 @@ PlasmoidItem {
 
                 RowLayout {
                     spacing: Kirigami.Units.smallSpacing * 2
-                    Count { dotColor: root.ok; value: root.agents ? root.agents.working : null }
-                    Count { dotColor: root.blocked; pulse: !!root.agents && root.agents.blocked > 0; value: root.agents ? root.agents.blocked : null }
-                    Count { dotColor: root.dim; value: root.agents ? root.agents.idle : null }
+                    Count { dotColor: root.ok; value: root.agents ? root.agents.working : null; levels: root.levelsFor("working") }
+                    Count { dotColor: root.blocked; pulse: !!root.agents && root.agents.blocked > 0; value: root.agents ? root.agents.blocked : null; levels: root.levelsFor("blocked") }
+                    Count { dotColor: root.dim; value: root.agents ? root.agents.idle : null; levels: root.levelsFor("idle") }
                 }
                 Pip {}
                 Meter { label: "5h"; win: root.bar ? root.bar.five_hour : null }
@@ -760,17 +872,35 @@ PlasmoidItem {
                         }
                     }
 
-                    PlasmaComponents.Label {
-                        visible: root.idleAgents.length > 0
-                        text: (root.showIdle ? "Hide " : "Show ") + root.idleAgents.length + " idle"
-                        color: idleHover.containsMouse ? Kirigami.Theme.textColor : root.dim
-                        font.pointSize: Kirigami.Theme.smallFont.pointSize
-                        MouseArea {
-                            id: idleHover
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: root.showIdle = !root.showIdle
+                    RowLayout {
+                        Layout.fillWidth: true
+                        PlasmaComponents.Label {
+                            visible: root.idleAgents.length > 0
+                            text: (root.showIdle ? "Hide " : "Show ") + root.idleAgents.length + " idle"
+                            color: idleHover.containsMouse ? Kirigami.Theme.textColor : root.dim
+                            font.pointSize: Kirigami.Theme.smallFont.pointSize
+                            MouseArea {
+                                id: idleHover
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.showIdle = !root.showIdle
+                            }
+                        }
+                        Item { Layout.fillWidth: true }
+                        Kirigami.Icon {
+                            source: "configure"
+                            color: gearHover.containsMouse ? Kirigami.Theme.textColor : root.dim
+                            isMask: true
+                            Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                            Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                            MouseArea {
+                                id: gearHover
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.openSettings()
+                            }
                         }
                     }
                 }

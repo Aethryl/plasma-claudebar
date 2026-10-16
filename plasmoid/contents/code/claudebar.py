@@ -4,11 +4,16 @@
 import json
 import os
 import subprocess
+import sys
 import time
 
 LIMITS_CACHE = os.path.expanduser("~/.cache/claude-bar/limits.json")
 STALE_AFTER = 15 * 60
 HERDR = os.path.expanduser("~/.local/bin/herdr")
+CONTEXT_DIR = os.path.expanduser("~/.cache/claude-bar/context")
+CONTEXT_MAX_AGE = 6 * 3600
+SETTINGS_FILE = os.path.expanduser("~/.config/claude-bar/settings.json")
+DEFAULTS = {"warn": 70, "critical": 85, "notify": True, "playful": False}
 
 
 def herdr(*args):
@@ -35,12 +40,38 @@ def labels():
     return workspaces, named_tabs
 
 
+def contexts(panes):
+    found = {}
+    try:
+        names = os.listdir(CONTEXT_DIR)
+    except OSError:
+        return found
+    now = time.time()
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(CONTEXT_DIR, name)
+        pane = name[: -len(".json")]
+        try:
+            if pane not in panes:
+                os.remove(path)
+                continue
+            with open(path) as f:
+                entry = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if now - entry.get("updated_at", 0) <= CONTEXT_MAX_AGE:
+            found[pane] = entry.get("pct")
+    return found
+
+
 def agents():
     try:
         listed = herdr("agent", "list")["agents"]
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
         return None
     workspaces, named_tabs = labels()
+    ctx = contexts({a.get("pane_id") for a in listed})
     counts = {"working": 0, "blocked": 0, "idle": 0}
     rows = []
     for agent in listed:
@@ -60,6 +91,7 @@ def agents():
                     if part
                 ),
                 "terminal_id": agent.get("terminal_id"),
+                "ctx": ctx.get(agent.get("pane_id")),
                 "focused": agent.get("focused", False),
             }
         )
@@ -98,4 +130,29 @@ def limits():
     }
 
 
-print(json.dumps({"agents": agents(), **limits()}))
+def settings():
+    try:
+        with open(SETTINGS_FILE) as f:
+            stored = json.load(f)
+    except (OSError, ValueError):
+        stored = {}
+    return {key: stored.get(key, default) for key, default in DEFAULTS.items()}
+
+
+def save(key, raw):
+    if key not in DEFAULTS:
+        raise SystemExit(f"unknown setting {key}")
+    current = settings()
+    current[key] = json.loads(raw)
+    os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
+    tmp = f"{SETTINGS_FILE}.{os.getpid()}.tmp"
+    with open(tmp, "w") as f:
+        json.dump(current, f, indent=1)
+    os.replace(tmp, SETTINGS_FILE)
+    print(json.dumps({"settings": current}))
+
+
+if len(sys.argv) == 4 and sys.argv[1] == "set":
+    save(sys.argv[2], sys.argv[3])
+else:
+    print(json.dumps({"agents": agents(), **limits(), "settings": settings()}))
