@@ -13,7 +13,26 @@ HERDR = os.path.expanduser("~/.local/bin/herdr")
 CONTEXT_DIR = os.path.expanduser("~/.cache/claude-bar/context")
 CONTEXT_MAX_AGE = 6 * 3600
 SETTINGS_FILE = os.path.expanduser("~/.config/claude-bar/settings.json")
-DEFAULTS = {"warn": 70, "critical": 85, "notify": True, "playful": False}
+MURAL_STATE = os.path.join(
+    os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
+    "mural",
+    "state.json",
+)
+MURAL_LIBRARY = os.environ.get(
+    "MURAL_LIBRARY", os.path.expanduser("~/Pictures/Wallpapers")
+)
+DEFAULTS = {
+    "warn": 70,
+    "critical": 85,
+    "notify": True,
+    "playful": False,
+    "outfits": "auto",
+    "outfit_fav": "pirate",
+    "outfit_events": True,
+    "outfit_seasons": True,
+    "outfit_wallpaper": True,
+    "outfit_random": True,
+}
 
 
 def herdr(*args):
@@ -130,6 +149,39 @@ def limits():
     }
 
 
+def wallpaper():
+    try:
+        with open(MURAL_STATE) as f:
+            current = json.load(f).get("current")
+    except (OSError, ValueError):
+        return None
+    if not current:
+        return None
+    try:
+        for folder in os.scandir(MURAL_LIBRARY):
+            if folder.is_dir() and any(
+                name.rsplit(".", 1)[0] == current for name in os.listdir(folder.path)
+            ):
+                return folder.name
+    except OSError:
+        return None
+    return None
+
+
+def music():
+    try:
+        out = subprocess.run(
+            ["playerctl", "-a", "status"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "Playing" in out.stdout.split()
+
+
 def settings():
     try:
         with open(SETTINGS_FILE) as f:
@@ -155,4 +207,14 @@ def save(key, raw):
 if len(sys.argv) == 4 and sys.argv[1] == "set":
     save(sys.argv[2], sys.argv[3])
 else:
-    print(json.dumps({"agents": agents(), **limits(), "settings": settings()}))
+    print(
+        json.dumps(
+            {
+                "agents": agents(),
+                **limits(),
+                "settings": settings(),
+                "wallpaper": wallpaper(),
+                "music": music(),
+            }
+        )
+    )

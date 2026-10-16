@@ -15,9 +15,9 @@ Rectangle {
     property int critical: app.settings.critical
 
     implicitWidth: Kirigami.Units.gridUnit * 26
-    implicitHeight: Kirigami.Units.gridUnit * 24
+    implicitHeight: Kirigami.Units.gridUnit * 30
     Layout.preferredWidth: Kirigami.Units.gridUnit * 26
-    Layout.preferredHeight: Kirigami.Units.gridUnit * 24
+    Layout.preferredHeight: Kirigami.Units.gridUnit * 30
     Layout.minimumWidth: Kirigami.Units.gridUnit * 20
     Layout.minimumHeight: Kirigami.Units.gridUnit * 20
 
@@ -180,6 +180,51 @@ Rectangle {
             text: "Notify when an agent reaches critical"
             checked: page.app.settings.notify
             onToggled: page.app.saveSetting("notify", checked)
+        }
+
+        Heading { text: "Outfits" }
+
+        RowLayout {
+            spacing: Kirigami.Units.largeSpacing
+            QQC2.ComboBox {
+                id: outfitMode
+                readonly property var modes: ["auto", "fixed", "off"]
+                model: ["Automatic", "Favourite", "Off"]
+                currentIndex: Math.max(0, modes.indexOf(page.app.settings.outfits))
+                onActivated: index => page.app.saveSetting("outfits", modes[index])
+            }
+            QQC2.ComboBox {
+                visible: page.app.settings.outfits === "fixed"
+                readonly property var keys: Object.keys(page.app.outfits)
+                model: keys.map(key => page.app.outfits[key].name)
+                currentIndex: Math.max(0, keys.indexOf(page.app.settings.outfit_fav))
+                onActivated: index => page.app.saveSetting("outfit_fav", keys[index])
+            }
+        }
+        GridLayout {
+            visible: page.app.settings.outfits === "auto"
+            columns: 2
+            columnSpacing: Kirigami.Units.gridUnit
+            QQC2.Switch {
+                text: "Events"
+                checked: page.app.settings.outfit_events
+                onToggled: page.app.saveSetting("outfit_events", checked)
+            }
+            QQC2.Switch {
+                text: "Season & clock"
+                checked: page.app.settings.outfit_seasons
+                onToggled: page.app.saveSetting("outfit_seasons", checked)
+            }
+            QQC2.Switch {
+                text: "Wallpaper"
+                checked: page.app.settings.outfit_wallpaper
+                onToggled: page.app.saveSetting("outfit_wallpaper", checked)
+            }
+            QQC2.Switch {
+                text: "Random closet"
+                checked: page.app.settings.outfit_random
+                onToggled: page.app.saveSetting("outfit_random", checked)
+            }
         }
 
         Heading { text: "Claude" }

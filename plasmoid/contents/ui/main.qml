@@ -31,12 +31,50 @@ PlasmoidItem {
     readonly property var idleAgents: agents ? agents.list.filter(a => a.status === "idle") : []
     readonly property bool windowed: Plasmoid.formFactor === PlasmaCore.Types.Planar || Plasmoid.location === PlasmaCore.Types.Floating
     property var pendingSettings: ({})
-    readonly property var settings: Object.assign({ warn: 70, critical: 85, notify: true, playful: false }, bar && bar.settings ? bar.settings : {}, pendingSettings)
+    readonly property var settings: Object.assign({ warn: 70, critical: 85, notify: true, playful: false, outfits: "auto", outfit_fav: "pirate", outfit_events: true, outfit_seasons: true, outfit_wallpaper: true, outfit_random: true }, bar && bar.settings ? bar.settings : {}, pendingSettings)
     readonly property string hotLevel: agents ? agents.list.reduce((worst, a) => {
         const level = ctxLevel(a.ctx)
         return level === "crit" || worst === "crit" ? "crit" : level || worst
     }, "") : ""
     property var notified: ({})
+    readonly property var outfits: ({
+        party: { name: "Party hat", group: "event", hat: 5 },
+        hard: { name: "Hard hat", group: "event", hat: 3 },
+        phones: { name: "Headphones", group: "event", hat: 2 },
+        crown: { name: "Crown", group: "event", hat: 3 },
+        witch: { name: "Witch hat", group: "season", hat: 5 },
+        santa: { name: "Santa hat", group: "season", hat: 5 },
+        night: { name: "Nightcap", group: "season", hat: 4 },
+        bow: { name: "Big bow", group: "wallpaper", hat: 4 },
+        cat: { name: "Cat ears", group: "wallpaper", hat: 3 },
+        magical: { name: "Magical girl", group: "wallpaper", hat: 3 },
+        astro: { name: "Astronaut", group: "wallpaper", hat: 5 },
+        captain: { name: "Space captain", group: "wallpaper", hat: 3 },
+        aviator: { name: "Aviator", group: "wallpaper", hat: 3 },
+        visor: { name: "Cyber visor", group: "wallpaper", hat: 0 },
+        retro: { name: "80s headband", group: "wallpaper", hat: 1 },
+        explorer: { name: "Pith helmet", group: "wallpaper", hat: 4 },
+        pirate: { name: "Pirate", group: "random", hat: 3 },
+        cowboy: { name: "Cowboy", group: "random", hat: 4 },
+        chef: { name: "Chef", group: "random", hat: 5 },
+        wizard: { name: "Wizard", group: "random", hat: 5 },
+        viking: { name: "Viking", group: "random", hat: 4 },
+        tophat: { name: "Top hat", group: "random", hat: 5 },
+        flowers: { name: "Flower crown", group: "random", hat: 2 },
+        beret: { name: "Beret", group: "random", hat: 3 },
+        grad: { name: "Graduate", group: "random", hat: 2 },
+        propeller: { name: "Propeller cap", group: "random", hat: 4 },
+        shades: { name: "Sunglasses", group: "random", hat: 0 }
+    })
+    readonly property var wallpaperOutfits: ({
+        "anime-ish": ["bow", "cat", "magical"],
+        "space": ["astro", "captain"],
+        "spaceships": ["captain", "astro", "aviator"],
+        "blueprints": ["aviator", "hard"],
+        "pixel-art": ["visor", "phones", "shades"],
+        "retro-futurism": ["retro", "shades"],
+        "illustration": ["explorer", "cowboy"]
+    })
 
     readonly property color ok: Kirigami.Theme.positiveTextColor
     readonly property color warning: Kirigami.Theme.neutralTextColor
@@ -47,6 +85,7 @@ PlasmoidItem {
     readonly property color hairline: Qt.alpha(Kirigami.Theme.textColor, 0.1)
 
     preferredRepresentation: windowed ? fullRepresentation : compactRepresentation
+    activationTogglesExpanded: false
     fullRepresentation: Settings {
         app: root
     }
@@ -259,7 +298,7 @@ PlasmoidItem {
             stretch: ["clawd-cheer", "clawd-cheer", "clawd-cheer", "clawd"],
             alarm: ["clawd-sweat-a", "clawd-sweat-b"]
         })
-        readonly property var names: ["clawd", "clawd-blink", "clawd-walk-a", "clawd-walk-b", "clawd-type-a", "clawd-type-b", "clawd-wave-up", "clawd-wave-mid", "clawd-cheer", "clawd-look-l", "clawd-look-r", "clawd-sweat-a", "clawd-sweat-b"]
+        readonly property var names: ["clawd", "clawd-blink", "clawd-walk-a", "clawd-walk-b", "clawd-type-a", "clawd-type-b", "clawd-wave-up", "clawd-wave-mid", "clawd-cheer", "clawd-look-l", "clawd-look-r", "clawd-sweat-a", "clawd-sweat-b", "clawd-squish", "clawd-happy"]
         readonly property var routines: ["walk", "type", "hop", "scan", "turn"]
         property string routine: "walk"
         property bool flipped: false
@@ -270,6 +309,42 @@ PlasmoidItem {
         property int lastWorking: 0
         property real homeX: 0
         property real minX: 0
+        property real maxX: 0
+        property real pointerX: -1
+        property bool pointerOnHim: false
+        property string reaction: ""
+        property string lastReaction: ""
+        property real lastClick: 0
+        property int waving: 0
+        property int startle: 0
+        property real rub: 0
+        property real lastRubX: -1
+        property string petFace: "clawd-squish"
+        property string baseOutfit: ""
+        property real partyUntil: 0
+        property real crownUntil: 0
+        property real lastWeekReset: -1
+        property string wornOutfit: ""
+        property string nextOutfit: ""
+        property int puff: -1
+        readonly property var wallpaperPool: root.bar && root.bar.wallpaper ? root.wallpaperOutfits[root.bar.wallpaper] || [] : []
+        readonly property string eventOutfit: !root.settings.outfit_events ? ""
+            : partyUntil > root.now * 1000 ? "party"
+            : crownUntil > root.now * 1000 ? "crown"
+            : working >= 3 ? "hard"
+            : root.bar && root.bar.music ? "phones"
+            : ""
+        readonly property string wantedOutfit: still || root.settings.outfits === "off" ? ""
+            : root.settings.outfits === "fixed" ? root.settings.outfit_fav
+            : eventOutfit || baseOutfit
+        readonly property int hatHeight: wornOutfit && root.outfits[wornOutfit] ? root.outfits[wornOutfit].hat : 0
+        readonly property bool busy: mood === "wave" || mood === "alarm" || mood === "dance"
+        readonly property bool hovering: pointerX >= 0
+        readonly property bool petting: pointerOnHim && rub > px * 30
+        readonly property bool chasing: hovering && !busy && reaction === "chase"
+        readonly property bool fleeing: !busy && reaction === "shy" && flee >= 0
+        property real flee: -1
+        readonly property real chaseX: Math.max(minX, Math.min(maxX, pointerX - width / 2))
         property real originX: 0
         property real wander: -1
         property bool settled: false
@@ -277,15 +352,23 @@ PlasmoidItem {
         property int tick: 0
         readonly property bool roams: !still && homeX - minX > width * 2
         readonly property bool roaming: mood === "work" || (mood === "idle" && playful)
-        readonly property real target: roams && wander >= 0 ? Math.max(minX, Math.min(wander, homeX)) : homeX
+        readonly property real target: chasing ? chaseX
+            : fleeing ? flee
+            : roams && wander >= 0 ? Math.max(minX, Math.min(wander, homeX)) : homeX
         readonly property bool moving: settled && Math.abs(pos - target) > 0.01
         property bool heading: false
         readonly property int stride: Math.floor(tick / 3) % 2
         readonly property string mood: dancing ? "dance" : waiting > 0 ? "wave" : root.hotLevel !== "" ? "alarm" : working > 0 ? "work" : "idle"
         readonly property string act: mood === "work" ? routine : mood
         readonly property real shiver: !still && mood === "alarm" && root.hotLevel === "crit" && step % 2 === 1 ? px : 0
+        readonly property string lookFrame: pointerX < pos + width / 2 - px * 3 ? "clawd-look-l" : pointerX > pos + width / 2 + px * 3 ? "clawd-look-r" : "clawd"
         readonly property string frame: still ? (mood === "alarm" ? "clawd-sweat-a" : "clawd")
+            : petting ? (step % 6 < 4 ? petFace : "clawd-cheer")
+            : startle > 0 ? "clawd-cheer"
+            : waving > 0 ? (waving % 4 < 2 ? "clawd-wave-up" : "clawd-wave-mid")
             : moving && mood !== "alarm" ? frames.walk[stride]
+            : chasing ? "clawd-cheer"
+            : hovering && !busy ? (pointerOnHim ? (blinking ? "clawd-blink" : "clawd") : lookFrame)
             : mood !== "idle" ? frames[act][step % frames[act].length]
             : fidget !== "" ? frames[fidget][Math.min(step, frames[fidget].length - 1)]
             : blinking ? "clawd-blink" : "clawd"
@@ -298,7 +381,7 @@ PlasmoidItem {
         property real jumpHeight: 0
 
         function leap(share) {
-            const headroom = mapToItem(null, 0, 0).y + px * 2 - barTop - px * 3
+            const headroom = mapToItem(null, 0, 0).y + px * 2 - barTop - px * 3 - hatHeight * px
             if (still || leaping.running || headroom < px * 2)
                 return
             jumpHeight = Math.round(headroom * share * dpr) / dpr
@@ -323,8 +406,112 @@ PlasmoidItem {
         Component.onCompleted: Qt.callLater(() => {
             clawd.pos = clawd.target
             clawd.lastHome = clawd.homeX
+            clawd.pickOutfit("start")
+            clawd.wornOutfit = clawd.wantedOutfit
             clawd.settled = true
         })
+        Connections {
+            target: root
+            function onBarChanged() {
+                const week = root.bar && root.bar.seven_day ? root.bar.seven_day.resets_at || 0 : 0
+                if (clawd.lastWeekReset > 0 && week > clawd.lastWeekReset + 3600)
+                    clawd.crownUntil = Date.now() + 600000
+                if (week > 0)
+                    clawd.lastWeekReset = week
+            }
+        }
+
+        function pickOutfit(reason) {
+            const s = root.settings
+            const today = new Date()
+            const day = Math.floor(today.getTime() / 86400000)
+            const season = !s.outfit_seasons ? ""
+                : today.getMonth() === 9 ? "witch"
+                : today.getMonth() === 11 ? "santa"
+                : (today.getHours() >= 23 || today.getHours() < 5) && day % 3 !== 0 ? "night"
+                : ""
+            const closet = s.outfit_random ? Object.keys(root.outfits).filter(k => root.outfits[k].group === "random").concat([""]) : []
+            const walls = s.outfit_wallpaper ? wallpaperPool : []
+            let pool = []
+            if (season && Math.random() < 0.5)
+                pool = [season]
+            else if (reason === "wallpaper" && walls.length)
+                pool = walls
+            else if (walls.length && Math.random() < 0.6)
+                pool = walls
+            else
+                pool = closet.length ? closet : walls
+            pool = pool.filter(o => o !== baseOutfit)
+            if (pool.length)
+                baseOutfit = pool[Math.floor(Math.random() * pool.length)]
+        }
+
+        onWantedOutfitChanged: {
+            if (!settled || still) {
+                wornOutfit = wantedOutfit
+                return
+            }
+            nextOutfit = wantedOutfit
+            if (puff < 0) {
+                puff = 0
+                leap(0.5)
+            }
+        }
+        onWallpaperPoolChanged: if (settled && root.settings.outfit_wallpaper) pickOutfit("wallpaper")
+
+        function pointerEntered() {
+            if (busy)
+                return
+            const pool = [["wave", 30], ["chase", 25], ["pet", 20], ["watch", 15], ["shy", Date.now() - lastClick < 60000 ? 0 : 10]]
+                .filter(entry => entry[0] !== lastReaction && entry[1] > 0)
+            let n = Math.random() * pool.reduce((sum, entry) => sum + entry[1], 0)
+            reaction = pool[pool.length - 1][0]
+            for (const entry of pool) {
+                n -= entry[1]
+                if (n < 0) {
+                    reaction = entry[0]
+                    break
+                }
+            }
+            lastReaction = reaction
+            petFace = Math.random() < 0.5 ? "clawd-squish" : "clawd-happy"
+        }
+
+        function pointerMoved(x, onHim) {
+            if (onHim && lastRubX >= 0)
+                rub += Math.abs(x - lastRubX)
+            lastRubX = x
+            pointerX = x
+            const entering = onHim && !pointerOnHim
+            pointerOnHim = onHim
+            if (busy)
+                return
+            if (entering && reaction === "wave" && waving === 0) {
+                waving = 12
+                leap(0.6)
+            }
+            if (reaction === "shy" && flee < 0 && Math.abs(x - (pos + width / 2)) < width * 1.5) {
+                startle = 4
+                leap(1)
+                flee = x < pos + width / 2 ? Math.min(maxX, pos + width * 6) : Math.max(minX, pos - width * 6)
+                heading = flee < pos
+            }
+        }
+
+        function pointerLeft() {
+            pointerX = -1
+            pointerOnHim = false
+            lastRubX = -1
+            reaction = ""
+            shyReturn.restart()
+        }
+
+        function clicked() {
+            lastClick = Date.now()
+            rub = px * 60
+            pointerOnHim = true
+            leap(0.6)
+        }
 
         function walkTo(spot) {
             if (moving)
@@ -358,6 +545,7 @@ PlasmoidItem {
                 step = 0
                 dancing = true
                 danceEnd.restart()
+                partyUntil = Date.now() + 60000
             }
             lastWorking = working
         }
@@ -370,7 +558,7 @@ PlasmoidItem {
                 y: -clawd.lift - Math.round(clawd.jump * clawd.dpr) / clawd.dpr
                 width: clawd.width
                 height: clawd.height
-                visible: modelData === clawd.frame
+                visible: modelData === clawd.frame && (clawd.puff < 1 || clawd.puff > 2)
                 mirror: clawd.moving ? clawd.heading : clawd.flipped
                 source: Qt.resolvedUrl("../images/" + modelData + ".svg")
                 sourceSize: Qt.size(clawd.width, clawd.height)
@@ -380,10 +568,17 @@ PlasmoidItem {
 
         Timer {
             interval: clawd.playful ? 170 : 340
-            running: !clawd.still && clawd.visible && (clawd.mood !== "idle" || clawd.fidget !== "")
+            running: !clawd.still && clawd.visible && (clawd.mood !== "idle" || clawd.fidget !== "" || clawd.hovering || clawd.rub > 0.5 || clawd.waving > 0 || clawd.startle > 0)
             repeat: true
             onTriggered: {
                 clawd.step += 1
+                clawd.rub *= 0.7
+                if (clawd.waving > 0)
+                    clawd.waving -= 1
+                if (clawd.startle > 0)
+                    clawd.startle -= 1
+                if (clawd.chasing && !clawd.moving && clawd.step % 6 === 0)
+                    clawd.leap(0.8)
                 if (clawd.act === "hop" && clawd.step % 4 === 1)
                     clawd.leap(0.7)
                 if (clawd.act === "dance" && clawd.step % 2 === 0)
@@ -402,6 +597,7 @@ PlasmoidItem {
             repeat: true
             onTriggered: {
                 const left = clawd.target - clawd.pos
+                clawd.heading = left < 0
                 clawd.pos += Math.sign(left) * Math.min(Math.abs(left), clawd.px * 2)
                 clawd.tick += 1
                 if (clawd.tick % 12 === 0 && Math.random() < (clawd.playful ? 0.35 : 0.15))
@@ -425,7 +621,7 @@ PlasmoidItem {
         }
         Timer {
             interval: 4000
-            running: !clawd.still && clawd.visible && clawd.mood === "idle" && clawd.fidget === ""
+            running: !clawd.still && clawd.visible && (clawd.mood === "idle" || clawd.pointerOnHim) && clawd.fidget === ""
             repeat: true
             onTriggered: {
                 interval = 4000 + Math.random() * 3000
@@ -467,11 +663,62 @@ PlasmoidItem {
                     Math.random() < 0.3 ? clawd.goHome() : clawd.pickSpot()
             }
         }
-        HoverHandler { id: clawdHover }
-        PlasmaComponents.ToolTip {
-            visible: clawdHover.hovered
-            delay: Kirigami.Units.toolTipDelay
-            text: ({ idle: "Claude is idle", work: "Claude is working", wave: "Claude needs you", dance: "All done!", alarm: "An agent's context is filling up" })[clawd.mood]
+        Image {
+            x: clawd.shiver
+            y: -clawd.lift - Math.round(clawd.jump * clawd.dpr) / clawd.dpr - clawd.px * 4 + (clawd.frame === "clawd-squish" ? clawd.px : 0)
+            width: clawd.width
+            height: clawd.px * 16
+            visible: clawd.wornOutfit !== "" && (clawd.puff < 1 || clawd.puff > 2)
+            mirror: clawd.moving ? clawd.heading : clawd.flipped
+            source: clawd.wornOutfit ? Qt.resolvedUrl("../images/outfits/" + clawd.wornOutfit + ".svg") : ""
+            sourceSize: Qt.size(width, height)
+            smooth: false
+        }
+        Repeater {
+            model: 12
+            Rectangle {
+                required property int index
+                readonly property real angle: index / 12 * Math.PI * 2
+                readonly property real radius: (3 + Math.max(0, clawd.puff) * 2) * clawd.px
+                visible: clawd.puff >= 0
+                width: clawd.px
+                height: clawd.px
+                color: "#E9E2D0"
+                opacity: Math.max(0, 1 - clawd.puff / 5)
+                x: Math.round((clawd.width / 2 + Math.cos(angle) * radius) * clawd.dpr) / clawd.dpr
+                y: Math.round((clawd.px * 4 + Math.sin(angle) * radius * 0.7 - Math.round(clawd.jump * clawd.dpr) / clawd.dpr) * clawd.dpr) / clawd.dpr
+            }
+        }
+        Timer {
+            interval: 80
+            running: clawd.puff >= 0
+            repeat: true
+            onTriggered: {
+                clawd.puff += 1
+                if (clawd.puff === 2)
+                    clawd.wornOutfit = clawd.nextOutfit
+                if (clawd.puff > 5) {
+                    clawd.puff = -1
+                    if (clawd.wornOutfit !== clawd.wantedOutfit) {
+                        clawd.nextOutfit = clawd.wantedOutfit
+                        clawd.puff = 0
+                    }
+                }
+            }
+        }
+        Timer {
+            interval: 1800000
+            running: !clawd.still && root.settings.outfits === "auto"
+            repeat: true
+            onTriggered: {
+                interval = 1200000 + Math.random() * 2400000
+                clawd.pickOutfit("whim")
+            }
+        }
+        Timer {
+            id: shyReturn
+            interval: 2500
+            onTriggered: if (!clawd.hovering) clawd.flee = -1
         }
     }
 
@@ -808,6 +1055,17 @@ PlasmoidItem {
         Component.onCompleted: { root.compactItem = area; place() }
 
         MouseArea {
+            id: walkway
+            anchors.fill: parent
+            hoverEnabled: true
+            readonly property bool onHim: containsMouse && mouseX >= sprite.x - sprite.px * 3 && mouseX <= sprite.x + sprite.width + sprite.px * 3
+            onEntered: sprite.pointerEntered()
+            onExited: sprite.pointerLeft()
+            onPositionChanged: sprite.pointerMoved(holder.globalX + mouseX, onHim)
+            onClicked: if (onHim) sprite.clicked()
+        }
+
+        MouseArea {
             id: area
             width: row.implicitWidth
             height: parent.height
@@ -845,7 +1103,7 @@ PlasmoidItem {
             homeX: holder.globalX + area.x + row.x + home.x
             minX: holder.globalX + Kirigami.Units.largeSpacing
             y: Math.round((holder.height - height) / 2)
-            TapHandler { onTapped: root.drooped = !root.drooped }
+            maxX: homeX
         }
     }
 
