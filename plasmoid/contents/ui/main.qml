@@ -272,34 +272,38 @@ PlasmoidItem {
         property real minX: 0
         property real wander: -1
         property bool settled: false
+        property real pos: 0
+        property int tick: 0
         readonly property bool roams: !still && homeX - minX > width * 2
         readonly property bool roaming: mood === "work" || (mood === "idle" && playful)
         readonly property real target: roams && roaming && wander >= 0 ? Math.max(minX, Math.min(wander, homeX)) : homeX
-        readonly property bool moving: settled && Math.abs(x - target) > px
-        readonly property bool heading: moving && target < x
+        readonly property bool moving: settled && Math.abs(pos - target) > 0.01
+        readonly property bool heading: target < pos
+        readonly property int stride: Math.floor(tick / 3) % 2
         readonly property string mood: dancing ? "dance" : waiting > 0 ? "wave" : root.hotLevel !== "" ? "alarm" : working > 0 ? "work" : "idle"
         readonly property string act: mood === "work" ? routine : mood
         readonly property real shiver: !still && mood === "alarm" && root.hotLevel === "crit" && step % 2 === 1 ? px : 0
         readonly property string frame: still ? (mood === "alarm" ? "clawd-sweat-a" : "clawd")
-            : moving && mood !== "alarm" ? frames.walk[step % 2]
+            : moving && mood !== "alarm" ? frames.walk[stride]
             : mood !== "idle" ? frames[act][step % frames[act].length]
             : fidget !== "" ? frames[fidget][Math.min(step, frames[fidget].length - 1)]
             : blinking ? "clawd-blink" : "clawd"
         readonly property real lift: still ? 0
+            : moving ? stride * px
             : act === "dance" && step % 2 === 0 ? px * 2
             : act === "hop" && step % 4 === 1 ? px * 2
             : act === "hop" && step % 4 === 3 ? px
-            : (moving || act === "walk" || act === "turn") && step % 2 === 1 ? px
+            : (act === "walk" || act === "turn") && step % 2 === 1 ? px
             : 0
 
         width: px * 18
         height: px * 12
-        x: target
-        Behavior on x {
-            enabled: clawd.settled
-            SmoothedAnimation { velocity: clawd.px * (clawd.playful ? 30 : 18) }
-        }
-        Component.onCompleted: Qt.callLater(() => clawd.settled = true)
+        x: Math.round(pos * dpr) / dpr
+        onHomeXChanged: if (!settled || (wander < 0 && !moving)) pos = homeX
+        Component.onCompleted: Qt.callLater(() => {
+            clawd.pos = clawd.target
+            clawd.settled = true
+        })
 
         function pickSpot() {
             wander = minX + Math.random() * Math.max(0, homeX - minX)
@@ -338,7 +342,7 @@ PlasmoidItem {
 
         Timer {
             interval: clawd.playful ? 170 : 340
-            running: !clawd.still && clawd.visible && (clawd.mood !== "idle" || clawd.fidget !== "" || clawd.moving)
+            running: !clawd.still && clawd.visible && (clawd.mood !== "idle" || clawd.fidget !== "")
             repeat: true
             onTriggered: {
                 clawd.step += 1
@@ -348,6 +352,16 @@ PlasmoidItem {
                     clawd.fidget = ""
                     clawd.step = 0
                 }
+            }
+        }
+        Timer {
+            interval: clawd.playful ? 60 : 80
+            running: clawd.moving && clawd.visible
+            repeat: true
+            onTriggered: {
+                const left = clawd.target - clawd.pos
+                clawd.pos += Math.sign(left) * Math.min(Math.abs(left), clawd.px * 2)
+                clawd.tick += 1
             }
         }
         Timer {
