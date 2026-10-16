@@ -268,10 +268,20 @@ PlasmoidItem {
         property string fidget: ""
         property int step: 0
         property int lastWorking: 0
+        property real homeX: 0
+        property real minX: 0
+        property real wander: -1
+        property bool settled: false
+        readonly property bool roams: !still && homeX - minX > width * 2
+        readonly property bool roaming: mood === "work" || (mood === "idle" && playful)
+        readonly property real target: roams && roaming && wander >= 0 ? Math.max(minX, Math.min(wander, homeX)) : homeX
+        readonly property bool moving: settled && Math.abs(x - target) > px
+        readonly property bool heading: moving && target < x
         readonly property string mood: dancing ? "dance" : waiting > 0 ? "wave" : root.hotLevel !== "" ? "alarm" : working > 0 ? "work" : "idle"
         readonly property string act: mood === "work" ? routine : mood
         readonly property real shiver: !still && mood === "alarm" && root.hotLevel === "crit" && step % 2 === 1 ? px : 0
         readonly property string frame: still ? (mood === "alarm" ? "clawd-sweat-a" : "clawd")
+            : moving && mood !== "alarm" ? frames.walk[step % 2]
             : mood !== "idle" ? frames[act][step % frames[act].length]
             : fidget !== "" ? frames[fidget][Math.min(step, frames[fidget].length - 1)]
             : blinking ? "clawd-blink" : "clawd"
@@ -279,15 +289,27 @@ PlasmoidItem {
             : act === "dance" && step % 2 === 0 ? px * 2
             : act === "hop" && step % 4 === 1 ? px * 2
             : act === "hop" && step % 4 === 3 ? px
-            : (act === "walk" || act === "turn") && step % 2 === 1 ? px
+            : (moving || act === "walk" || act === "turn") && step % 2 === 1 ? px
             : 0
 
-        Layout.preferredWidth: px * 18
-        Layout.preferredHeight: px * 12
+        width: px * 18
+        height: px * 12
+        x: target
+        Behavior on x {
+            enabled: clawd.settled
+            SmoothedAnimation { velocity: clawd.px * (clawd.playful ? 30 : 18) }
+        }
+        Component.onCompleted: Qt.callLater(() => clawd.settled = true)
+
+        function pickSpot() {
+            wander = minX + Math.random() * Math.max(0, homeX - minX)
+        }
 
         onMoodChanged: {
             step = 0
             flipped = false
+            if (mood !== "work")
+                wander = -1
         }
         onWorkingChanged: {
             if (lastWorking > 0 && working === 0 && waiting === 0 && !still) {
@@ -307,7 +329,7 @@ PlasmoidItem {
                 width: clawd.width
                 height: clawd.height
                 visible: modelData === clawd.frame
-                mirror: clawd.flipped
+                mirror: clawd.moving ? clawd.heading : clawd.flipped
                 source: Qt.resolvedUrl("../images/" + modelData + ".svg")
                 sourceSize: Qt.size(clawd.width, clawd.height)
                 smooth: false
@@ -316,7 +338,7 @@ PlasmoidItem {
 
         Timer {
             interval: clawd.playful ? 170 : 340
-            running: !clawd.still && clawd.visible && (clawd.mood !== "idle" || clawd.fidget !== "")
+            running: !clawd.still && clawd.visible && (clawd.mood !== "idle" || clawd.fidget !== "" || clawd.moving)
             repeat: true
             onTriggered: {
                 clawd.step += 1
@@ -327,6 +349,11 @@ PlasmoidItem {
                     clawd.step = 0
                 }
             }
+        }
+        Timer {
+            id: strollBack
+            interval: 12000
+            onTriggered: if (clawd.mood === "idle") clawd.wander = -1
         }
         Timer {
             id: danceEnd
@@ -355,6 +382,11 @@ PlasmoidItem {
             onTriggered: {
                 interval = 20000 + Math.random() * 20000
                 clawd.step = 0
+                if (clawd.roams && clawd.wander < 0 && Math.random() < 0.5) {
+                    clawd.pickSpot()
+                    strollBack.restart()
+                    return
+                }
                 clawd.fidget = Math.random() < 0.6 ? "lookaround" : "stretch"
             }
         }
@@ -368,6 +400,8 @@ PlasmoidItem {
                 clawd.routine = others[Math.floor(Math.random() * others.length)]
                 clawd.step = 0
                 clawd.flipped = false
+                if (clawd.roams)
+                    Math.random() < 0.3 ? clawd.wander = -1 : clawd.pickSpot()
             }
         }
         HoverHandler { id: clawdHover }
@@ -723,7 +757,11 @@ PlasmoidItem {
                 anchors.centerIn: parent
                 spacing: Kirigami.Units.largeSpacing
 
-                Clawd {}
+                Item {
+                    id: home
+                    Layout.preferredWidth: sprite.width
+                    Layout.preferredHeight: sprite.height
+                }
 
                 RowLayout {
                     spacing: Kirigami.Units.smallSpacing * 2
@@ -736,6 +774,14 @@ PlasmoidItem {
                 Pip {}
                 Meter { label: "7d"; win: root.bar ? root.bar.seven_day : null }
             }
+        }
+
+        Clawd {
+            id: sprite
+            homeX: area.x + row.x + home.x
+            minX: Kirigami.Units.largeSpacing
+            y: Math.round((holder.height - height) / 2)
+            TapHandler { onTapped: root.drooped = !root.drooped }
         }
     }
 
