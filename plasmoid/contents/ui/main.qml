@@ -351,7 +351,7 @@ PlasmoidItem {
         property real pos: 0
         property int tick: 0
         readonly property bool roams: !still && homeX - minX > width * 2
-        readonly property bool roaming: mood === "work" || (mood === "idle" && playful)
+        readonly property bool roaming: mood === "work"
         readonly property real target: chasing ? chaseX
             : fleeing ? flee
             : roams && wander >= 0 ? Math.max(minX, Math.min(wander, homeX)) : homeX
@@ -611,7 +611,7 @@ PlasmoidItem {
         }
         Timer {
             id: homeCall
-            interval: 6000
+            interval: 4000
             onTriggered: if (!clawd.roaming) clawd.goHome()
         }
         Timer {
@@ -636,17 +636,24 @@ PlasmoidItem {
         }
         Timer {
             interval: 25000
-            running: clawd.playful && !clawd.still && clawd.visible && clawd.mood === "idle"
+            running: !clawd.still && clawd.visible && clawd.mood === "idle" && !clawd.hovering
             repeat: true
             onTriggered: {
-                interval = 20000 + Math.random() * 20000
+                interval = clawd.playful ? 20000 + Math.random() * 20000 : 40000 + Math.random() * 40000
                 clawd.step = 0
-                if (clawd.roams && clawd.wander < 0 && !clawd.moving && Math.random() < 0.5) {
+                if (clawd.moving)
+                    return
+                if (clawd.wander >= 0) {
+                    clawd.goHome()
+                    return
+                }
+                if (clawd.roams && Math.random() < (clawd.playful ? 0.5 : 0.7)) {
                     clawd.pickSpot()
                     strollBack.restart()
                     return
                 }
-                clawd.fidget = Math.random() < 0.6 ? "lookaround" : "stretch"
+                if (clawd.playful)
+                    clawd.fidget = Math.random() < 0.6 ? "lookaround" : "stretch"
             }
         }
         Timer {
