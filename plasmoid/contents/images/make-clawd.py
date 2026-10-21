@@ -21,6 +21,10 @@ PALETTE = {
     "s": "#C9A96B",
     "n": "#3A5A8C",
     "pk": "#F0A8C8",
+    "e": "#8F4A30",
+    "x": "#B5AE98",
+    "h": "#8B6B4A",
+    "m": "#5E9A92",
 }
 
 BODY = [
@@ -82,7 +86,7 @@ FRAMES = {
 }
 
 
-def runs(grid: list[str], mark: str) -> str:
+def runs(grid: list[str], mark: str, tall: int = 2) -> str:
     out = []
     for y, row in enumerate(grid):
         x = 0
@@ -92,7 +96,7 @@ def runs(grid: list[str], mark: str) -> str:
                 while x < len(row) and row[x] == mark:
                     x += 1
                 width = x - start
-                out.append(f"M{start} {y * 2}h{width}v2h-{width}z")
+                out.append(f"M{start} {y * tall}h{width}v{tall}h-{width}z")
             else:
                 x += 1
     return "".join(out)
@@ -139,22 +143,144 @@ FULL = {
 }
 
 
-def svg_full(grid: list[str]) -> str:
-    rects = []
-    for y, row in enumerate(grid):
-        x = 0
-        while x < len(row):
-            if row[x] == "#":
-                start = x
-                while x < len(row) and row[x] == "#":
-                    x += 1
-                rects.append(f"M{start} {y}h{x - start}v1h-{x - start}z")
-            else:
-                x += 1
-    return (
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 18 12">'
-        f'<path fill="{COLOR}" d="{"".join(rects)}"/></svg>\n'
+def svg_grid(grid: list[str]) -> str:
+    marks = dict.fromkeys(c for row in grid for c in row if c != ".")
+    paths = "".join(
+        f'<path fill="{COLOR if m == "#" else PALETTE[m]}" d="{runs(grid, m, 1)}"/>'
+        for m in marks
     )
+    return f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {len(grid[0])} {len(grid)}">{paths}</svg>\n'
+
+
+def paint(grid: list[str], cells: list[tuple[int, int]], mark: str) -> list[str]:
+    rows = [list(row) for row in grid]
+    for x, y in cells:
+        rows[y][x] = mark
+    return ["".join(row) for row in rows]
+
+
+def shut(grid: list[str], row: int) -> list[str]:
+    return paint(
+        paint(grid, [(5, row - 1), (12, row - 1)], "#"), [(5, row), (12, row)], "e"
+    )
+
+
+def tall(grid: list[str]) -> list[str]:
+    return [row for row in grid for _ in (0, 1)]
+
+
+def floor(grid: list[str]) -> list[str]:
+    return ["." * 18] * (12 - len(grid)) + grid
+
+
+def yawn(big: bool) -> list[str]:
+    mouth = [(x, y) for x in range(7, 11) for y in (8, 9)] if big else [(8, 8), (9, 8)]
+    return paint(shut(tall(FRAMES["clawd-cheer"]), 5), mouth, "k")
+
+
+def nod(drop: int) -> list[str]:
+    squish = FULL["clawd-squish"]
+    head = squish if drop < 0 else shut(squish, 5)
+    shift = 1 if drop > 1 else 0
+    rows = [list(row) if y > 9 else ["."] * 18 for y, row in enumerate(squish)]
+    for y in range(10):
+        for x, c in enumerate(head[y]):
+            if c != "." and 0 <= y + drop < 12 and x + shift < 18:
+                rows[y + drop][x + shift] = c
+    return ["".join(row) for row in rows]
+
+
+def box(
+    width: int, height: int, rects: list[tuple[int, int, int, int, str]]
+) -> list[str]:
+    rows = [["."] * width for _ in range(height)]
+    for x0, y0, w, h, mark in rects:
+        for y in range(y0, y0 + h):
+            for x in range(x0, x0 + w):
+                rows[y][x] = mark
+    return ["".join(row) for row in rows]
+
+
+def blanket(top: int) -> list[str]:
+    stripes = [(x, top + 2, 3, 1, "m") for x in range(3, 23, 6)]
+    return box(
+        24,
+        7,
+        [
+            (0, top, 24, 7 - top, "b"),
+            (0, top, 24, 1, "m"),
+            (0, 6, 24, 1, "m"),
+            *stripes,
+        ],
+    )
+
+
+LIE = [
+    "...############...",
+    "...##.######.##...",
+    ".################.",
+    ".################.",
+    "..##############..",
+]
+
+FULL |= {
+    "clawd-sleepy": shut(tall(BODY), 5),
+    "clawd-yawn-a": yawn(False),
+    "clawd-yawn-b": yawn(True),
+    "clawd-doze": shut(FULL["clawd-squish"], 5),
+    "clawd-nod-up": nod(-1),
+    "clawd-nod-1": nod(1),
+    "clawd-nod-2": nod(2),
+    "clawd-nod-3": nod(3),
+    "clawd-lie": floor(LIE),
+    "clawd-lie-blink": floor(paint(LIE, [(5, 1), (12, 1)], "#")),
+    "clawd-lie-sl": floor(shut(LIE, 1)),
+    "clawd-lie-in": floor(shut([LIE[0], *LIE], 2)),
+}
+
+PROPS = {
+    "clawd-book-a": [
+        "ggggggggggg",
+        "gwwwwdwwwwg",
+        "gwxxwdwxxwg",
+        "gwwwwdwwwwg",
+        "gwxxwdwxxwg",
+        "ggggggggggg",
+    ],
+    "clawd-book-b": [
+        "ggggggggggg",
+        "gwxxwdwxxwg",
+        "gwwwwdwwwwg",
+        "gwxxwdwxxwg",
+        "gwwwwdwwwwg",
+        "ggggggggggg",
+    ],
+    "clawd-book-f": [
+        "ggggggggggg",
+        "gwwwwdwwwwg",
+        "gwwwwdwwwwg",
+        "gwwwwdwwwwg",
+        "gwwwwdwwwwg",
+        "ggggggggggg",
+    ],
+    "clawd-mug": ["xxxx.", "wwwww", "wwwww", "wwww."],
+    "clawd-z-s": ["bbbb", "..b.", ".b..", "bbbb"],
+    "clawd-z-l": ["bbbbb", "...b.", "..b..", ".b...", "bbbbb"],
+    "clawd-bang": ["r", "r", "r", ".", "r"],
+    "clawd-bed": box(
+        36,
+        10,
+        [
+            (3, 4, 8, 2, "w"),
+            (0, 0, 3, 10, "h"),
+            (33, 4, 3, 6, "h"),
+            (0, 8, 36, 2, "h"),
+            (3, 6, 30, 2, "w"),
+        ],
+    ),
+    "clawd-blanket-a": blanket(1),
+    "clawd-blanket-b": blanket(0),
+}
 
 
 Span = tuple[int, int, int, str] | tuple[int, int, int, str, int]
@@ -380,7 +506,10 @@ def main() -> None:
         (HERE / f"{name}.svg").write_text(svg(grid))
     for name, grid in FULL.items():
         assert len(grid) == 12 and all(len(row) == 18 for row in grid), name
-        (HERE / f"{name}.svg").write_text(svg_full(grid))
+        (HERE / f"{name}.svg").write_text(svg_grid(grid))
+    for name, grid in PROPS.items():
+        assert all(len(row) == len(grid[0]) for row in grid), name
+        (HERE / f"{name}.svg").write_text(svg_grid(grid))
     outfits = HERE / "outfits"
     outfits.mkdir(exist_ok=True)
     for name, spans in OUTFITS.items():

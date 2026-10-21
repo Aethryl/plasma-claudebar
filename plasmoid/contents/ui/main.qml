@@ -298,7 +298,13 @@ PlasmoidItem {
             stretch: ["clawd-cheer", "clawd-cheer", "clawd-cheer", "clawd"],
             alarm: ["clawd-sweat-a", "clawd-sweat-b"]
         })
-        readonly property var names: ["clawd", "clawd-blink", "clawd-walk-a", "clawd-walk-b", "clawd-type-a", "clawd-type-b", "clawd-wave-up", "clawd-wave-mid", "clawd-cheer", "clawd-look-l", "clawd-look-r", "clawd-sweat-a", "clawd-sweat-b", "clawd-squish", "clawd-happy"]
+        readonly property var cues: ({
+            wind: [[0.35, "clawd-look-l"], [0.7, "clawd-look-r"], [1, "clawd-look-l"], [1.6, "clawd"], [1.72, "clawd-blink"], [2, "clawd"], [2.5, "clawd-yawn-a"], [3.1, "clawd-yawn-b"], [3.4, "clawd-yawn-a"], [3.8, "clawd-doze"]],
+            nod: [[1.6, "clawd-squish"], [2, "clawd-nod-1"], [2.4, "clawd-nod-2"], [2.7, "clawd-nod-up"], [3.6, "clawd-squish"], [4.2, "clawd-doze"], [4.8, "clawd-nod-1"], [5.4, "clawd-nod-2"], [5.7, "clawd-nod-up"], [6.4, "clawd-squish"], [7, "clawd-nod-1"], [8.4, "clawd-nod-2"], [9, "clawd-nod-3"]],
+            wake: [[0.5, "clawd-cheer"], [0.65, "clawd-squish"], [0.9, "clawd-look-l"], [1.15, "clawd-look-r"], [1.4, "clawd-look-l"], [1.8, "clawd"]]
+        })
+        readonly property var names: ["clawd", "clawd-blink", "clawd-walk-a", "clawd-walk-b", "clawd-type-a", "clawd-type-b", "clawd-wave-up", "clawd-wave-mid", "clawd-cheer", "clawd-look-l", "clawd-look-r", "clawd-sweat-a", "clawd-sweat-b", "clawd-squish", "clawd-happy", "clawd-sleepy", "clawd-yawn-a", "clawd-yawn-b", "clawd-doze", "clawd-nod-up", "clawd-nod-1", "clawd-nod-2", "clawd-nod-3", "clawd-lie", "clawd-lie-blink", "clawd-lie-sl", "clawd-lie-in"]
+        readonly property var hatShift: ({ "clawd-squish": [0, 1], "clawd-doze": [0, 1], "clawd-nod-1": [0, 2], "clawd-nod-2": [1, 3], "clawd-nod-3": [1, 4] })
         readonly property var routines: ["walk", "type", "hop", "scan", "turn"]
         property string routine: "walk"
         property bool flipped: false
@@ -327,6 +333,36 @@ PlasmoidItem {
         property string wornOutfit: ""
         property string nextOutfit: ""
         property int puff: -1
+        property string rest: ""
+        property real restClock: 0
+        property real waking: -1
+        property string hobby: ""
+        property bool tucking: false
+        readonly property bool parked: waking >= 0 || rest !== "" && !(rest === "wind" && restClock === 0)
+        readonly property int roomLeft: Math.floor((pos - minX) / px)
+        readonly property int roomRight: Math.floor((homeX - pos) / px)
+        readonly property int roomAbove: Math.floor(y / px)
+        readonly property int roomBelow: parent ? Math.floor((parent.height - y - height) / px) : 0
+        readonly property int sideRoom: Math.max(roomLeft, roomRight)
+        readonly property bool bedFits: roomRight - 18 >= -roomLeft
+        readonly property int bedX: Math.max(-roomLeft, Math.min(roomRight - 18, -6))
+        readonly property bool inBed: rest === "sleep" && bedFits
+        readonly property bool breathing: restClock > 1.5 && restClock % 3 < 1.5
+        readonly property real bodyX: inBed ? (bedX + 6) * px : 0
+        readonly property real bodyY: inBed ? -px * (breathing ? 5 : 4) : 0
+        readonly property real beat: restClock % 6
+        readonly property bool tug: hobby === "fish" && beat > 3.6 && beat < 4.6
+        readonly property real sip: hobby === "sip" && beat > 2 && beat < 4 ? Math.sin((beat - 2) / 2 * Math.PI) : 0
+        readonly property int rodLen: Math.max(4, Math.min(10, sideRoom - 1, 6 + roomAbove))
+        readonly property int bobY: Math.min(16 + (tug ? 3 : Math.round(Math.sin(restClock * 2))), 10 + roomBelow)
+        readonly property real snoreFrom: rest === "sleep" ? 1.8 : rest === "nod" ? 8.4 : -1
+        readonly property point snoreAt: inBed ? Qt.point(bedX + 20, -1) : rest === "sleep" ? Qt.point(16, 3) : Qt.point(flipped ? -4 : 18, 3)
+        readonly property string restFrame: rest === "wind" || rest === "nod" ? cue(cues[rest], restClock)
+            : rest === "sleep" ? (restClock < 1.2 ? "clawd-lie" : restClock < 1.4 ? "clawd-lie-blink" : breathing && !bedFits ? "clawd-lie-in" : "clawd-lie-sl")
+            : beat < 0.3 ? "clawd"
+            : hobby === "read" ? (blinking ? "clawd-blink" : Math.floor(beat / 0.7) % 2 ? "clawd-look-r" : "clawd-look-l")
+            : hobby === "sip" ? (sip > 0.5 ? "clawd-sleepy" : "clawd")
+            : tug ? "clawd-look-r" : blinking ? "clawd-blink" : "clawd"
         readonly property var wallpaperPool: root.bar && root.bar.wallpaper ? root.wallpaperOutfits[root.bar.wallpaper] || [] : []
         readonly property string eventOutfit: !root.settings.outfit_events ? ""
             : partyUntil > root.now * 1000 ? "party"
@@ -341,7 +377,7 @@ PlasmoidItem {
         readonly property bool busy: mood === "wave" || mood === "alarm" || mood === "dance"
         readonly property bool hovering: pointerX >= 0
         readonly property bool petting: pointerOnHim && rub > px * 30
-        readonly property bool chasing: hovering && !busy && reaction === "chase"
+        readonly property bool chasing: hovering && !busy && !parked && reaction === "chase"
         readonly property bool fleeing: !busy && reaction === "shy" && flee >= 0
         property real flee: -1
         readonly property real chaseX: Math.max(minX, Math.min(maxX, pointerX - width / 2))
@@ -352,7 +388,8 @@ PlasmoidItem {
         property int tick: 0
         readonly property bool roams: !still && homeX - minX > width * 2
         readonly property bool roaming: mood === "work"
-        readonly property real target: chasing ? chaseX
+        readonly property real target: parked ? pos
+            : chasing ? chaseX
             : fleeing ? flee
             : roams && wander >= 0 ? Math.max(minX, Math.min(wander, homeX)) : homeX
         readonly property bool moving: settled && Math.abs(pos - target) > 0.01
@@ -363,13 +400,15 @@ PlasmoidItem {
         readonly property real shiver: !still && mood === "alarm" && root.hotLevel === "crit" && step % 2 === 1 ? px : 0
         readonly property string lookFrame: pointerX < pos + width / 2 - px * 3 ? "clawd-look-l" : pointerX > pos + width / 2 + px * 3 ? "clawd-look-r" : "clawd"
         readonly property string frame: still ? (mood === "alarm" ? "clawd-sweat-a" : "clawd")
+            : waking >= 0 ? cue(cues.wake, waking)
+            : rest !== "" && parked ? restFrame
             : petting ? (step % 6 < 4 ? petFace : "clawd-cheer")
             : startle > 0 ? "clawd-cheer"
             : waving > 0 ? (waving % 4 < 2 ? "clawd-wave-up" : "clawd-wave-mid")
             : moving && mood !== "alarm" ? frames.walk[stride]
             : chasing ? "clawd-cheer"
             : hovering && !busy ? (pointerOnHim ? (blinking ? "clawd-blink" : "clawd") : lookFrame)
-            : mood !== "idle" ? frames[act][step % frames[act].length]
+            : frames[act] ? frames[act][step % frames[act].length]
             : fidget !== "" ? frames[fidget][Math.min(step, frames[fidget].length - 1)]
             : blinking ? "clawd-blink" : "clawd"
         readonly property real lift: still || jump > 0 ? 0
@@ -379,6 +418,50 @@ PlasmoidItem {
         readonly property real barTop: 3
         property real jump: 0
         property real jumpHeight: 0
+
+        function cue(list, t) {
+            for (const entry of list)
+                if (t < entry[0])
+                    return entry[1]
+            return list[list.length - 1][1]
+        }
+
+        function nodOff() {
+            bedtime.interval = 120000 + Math.random() * 120000
+            rest = "nod"
+            restClock = 0
+        }
+
+        function pickHobby() {
+            flipped = roomLeft > roomRight
+            const fits = sideRoom >= 5 ? ["read", "sip", "fish"] : ["read"]
+            const pool = fits.length > 1 ? fits.filter(h => h !== hobby) : fits
+            hobby = pool[Math.floor(Math.random() * pool.length)]
+            rest = "chill"
+            restClock = 0
+        }
+
+        function tuck() {
+            tucking = true
+            if (puff < 0 || puff > 2) {
+                nextOutfit = wantedOutfit
+                puff = 0
+            }
+        }
+
+        function wake() {
+            if (rest === "wind" && restClock === 0) {
+                rest = ""
+                return
+            }
+            if (inBed)
+                pos += bodyX
+            rest = ""
+            tucking = false
+            restClock = 0
+            waking = 0
+            leap(0.6)
+        }
 
         function leap(share) {
             const headroom = mapToItem(null, 0, 0).y + px * 2 - barTop - px * 3 - hatHeight * px
@@ -447,7 +530,7 @@ PlasmoidItem {
         }
 
         onWantedOutfitChanged: {
-            if (!settled || still) {
+            if (!settled || still || rest !== "") {
                 wornOutfit = wantedOutfit
                 return
             }
@@ -458,9 +541,14 @@ PlasmoidItem {
             }
         }
         onWallpaperPoolChanged: if (settled && root.settings.outfit_wallpaper) pickOutfit("wallpaper")
+        onStillChanged: if (still) {
+            rest = ""
+            waking = -1
+            tucking = false
+        }
 
         function pointerEntered() {
-            if (busy)
+            if (busy || rest !== "")
                 return
             const pool = [["wave", 30], ["chase", 25], ["pet", 20], ["watch", 15], ["shy", Date.now() - lastClick < 60000 ? 0 : 10]]
                 .filter(entry => entry[0] !== lastReaction && entry[1] > 0)
@@ -484,6 +572,11 @@ PlasmoidItem {
             pointerX = x
             const entering = onHim && !pointerOnHim
             pointerOnHim = onHim
+            if (rest !== "") {
+                if (onHim)
+                    wake()
+                return
+            }
             if (busy)
                 return
             if (entering && reaction === "wave" && waving === 0) {
@@ -535,6 +628,8 @@ PlasmoidItem {
         }
 
         onMoodChanged: {
+            if (rest !== "")
+                wake()
             step = 0
             flipped = false
             if (!roaming)
@@ -554,8 +649,8 @@ PlasmoidItem {
             model: clawd.names
             Image {
                 required property string modelData
-                x: clawd.shiver
-                y: -clawd.lift - Math.round(clawd.jump * clawd.dpr) / clawd.dpr
+                x: clawd.shiver + clawd.bodyX
+                y: -clawd.lift - Math.round(clawd.jump * clawd.dpr) / clawd.dpr + clawd.bodyY
                 width: clawd.width
                 height: clawd.height
                 visible: modelData === clawd.frame && (clawd.puff < 1 || clawd.puff > 2)
@@ -636,7 +731,7 @@ PlasmoidItem {
         }
         Timer {
             interval: 25000
-            running: !clawd.still && clawd.visible && clawd.mood === "idle" && !clawd.hovering
+            running: !clawd.still && clawd.visible && clawd.mood === "idle" && !clawd.hovering && clawd.rest === ""
             repeat: true
             onTriggered: {
                 interval = clawd.playful ? 20000 + Math.random() * 20000 : 40000 + Math.random() * 40000
@@ -671,11 +766,12 @@ PlasmoidItem {
             }
         }
         Image {
-            x: clawd.shiver
-            y: -clawd.lift - Math.round(clawd.jump * clawd.dpr) / clawd.dpr - clawd.px * 4 + (clawd.frame === "clawd-squish" ? clawd.px : 0)
+            readonly property var shift: clawd.hatShift[clawd.frame] || [0, 0]
+            x: clawd.shiver + (mirror ? -shift[0] : shift[0]) * clawd.px
+            y: -clawd.lift - Math.round(clawd.jump * clawd.dpr) / clawd.dpr - clawd.px * (4 - shift[1])
             width: clawd.width
             height: clawd.px * 16
-            visible: clawd.wornOutfit !== "" && (clawd.puff < 1 || clawd.puff > 2)
+            visible: clawd.wornOutfit !== "" && !clawd.frame.startsWith("clawd-lie") && (clawd.puff < 1 || clawd.puff > 2)
             mirror: clawd.moving ? clawd.heading : clawd.flipped
             source: clawd.wornOutfit ? Qt.resolvedUrl("../images/outfits/" + clawd.wornOutfit + ".svg") : ""
             sourceSize: Qt.size(width, height)
@@ -702,8 +798,15 @@ PlasmoidItem {
             repeat: true
             onTriggered: {
                 clawd.puff += 1
-                if (clawd.puff === 2)
+                if (clawd.puff === 2) {
                     clawd.wornOutfit = clawd.nextOutfit
+                    if (clawd.tucking) {
+                        clawd.tucking = false
+                        clawd.flipped = false
+                        clawd.rest = "sleep"
+                        clawd.restClock = 0
+                    }
+                }
                 if (clawd.puff > 5) {
                     clawd.puff = -1
                     if (clawd.wornOutfit !== clawd.wantedOutfit) {
@@ -721,6 +824,196 @@ PlasmoidItem {
                 interval = 1200000 + Math.random() * 2400000
                 clawd.pickOutfit("whim")
             }
+        }
+        Timer {
+            interval: 30000
+            running: !clawd.still && clawd.visible && clawd.mood === "idle" && !clawd.hovering && clawd.rest === "" && clawd.waking < 0
+            onTriggered: {
+                clawd.fidget = ""
+                clawd.goHome()
+                clawd.rest = "wind"
+                clawd.restClock = 0
+            }
+        }
+        Timer {
+            interval: 100
+            running: !clawd.still && clawd.visible && (clawd.rest !== "" || clawd.waking >= 0)
+            repeat: true
+            onTriggered: {
+                if (clawd.waking >= 0) {
+                    clawd.waking = clawd.waking + 0.1 >= 1.8 ? -1 : clawd.waking + 0.1
+                    return
+                }
+                if (clawd.rest === "wind" && clawd.restClock === 0 && clawd.moving)
+                    return
+                clawd.restClock += 0.1
+                if (clawd.rest === "wind" && clawd.restClock >= 3.8)
+                    Math.random() < 0.5 ? clawd.nodOff() : clawd.pickHobby()
+            }
+        }
+        Timer {
+            interval: 20000
+            running: clawd.rest === "chill" && clawd.visible
+            repeat: true
+            onTriggered: {
+                interval = 15000 + Math.random() * 15000
+                clawd.pickHobby()
+            }
+        }
+        Timer {
+            interval: 300000
+            running: clawd.rest === "chill" && clawd.visible
+            repeat: true
+            onTriggered: {
+                interval = 240000 + Math.random() * 360000
+                if (Math.random() < 0.5)
+                    clawd.nodOff()
+            }
+        }
+        Timer {
+            id: bedtime
+            interval: 180000
+            running: clawd.rest === "nod" && clawd.visible
+            onTriggered: clawd.tuck()
+        }
+        Image {
+            z: -1
+            visible: clawd.inBed
+            x: clawd.bedX * clawd.px
+            y: clawd.px * 2
+            width: clawd.px * 36
+            height: clawd.px * 10
+            source: Qt.resolvedUrl("../images/clawd-bed.svg")
+            sourceSize: Qt.size(width, height)
+            smooth: false
+        }
+        Image {
+            z: 1
+            visible: clawd.inBed && (clawd.puff < 1 || clawd.puff > 2)
+            x: (clawd.bedX + 9) * clawd.px
+            y: clawd.px * 4
+            width: clawd.px * 24
+            height: clawd.px * 7
+            source: Qt.resolvedUrl("../images/clawd-blanket-" + (clawd.breathing ? "b" : "a") + ".svg")
+            sourceSize: Qt.size(width, height)
+            smooth: false
+        }
+        Item {
+            z: 1
+            width: clawd.width
+            height: clawd.height
+            visible: clawd.rest === "chill" && clawd.beat >= 0.3
+            transform: Scale { origin.x: clawd.width / 2; xScale: clawd.flipped ? -1 : 1 }
+            Image {
+                visible: clawd.hobby === "read"
+                x: clawd.px * 3
+                y: clawd.px * 5
+                width: clawd.px * 11
+                height: clawd.px * 6
+                source: Qt.resolvedUrl("../images/clawd-book-" + (clawd.beat % 3 > 2.7 ? "f" : Math.floor(clawd.beat / 3) % 2 ? "b" : "a") + ".svg")
+                sourceSize: Qt.size(width, height)
+                smooth: false
+            }
+            Image {
+                id: mug
+                visible: clawd.hobby === "sip"
+                x: Math.round(18 - 5 * clawd.sip) * clawd.px
+                y: Math.round(6 - 4 * clawd.sip) * clawd.px
+                width: clawd.px * 5
+                height: clawd.px * 4
+                source: Qt.resolvedUrl("../images/clawd-mug.svg")
+                sourceSize: Qt.size(width, height)
+                smooth: false
+            }
+            Repeater {
+                model: 2
+                Rectangle {
+                    required property int index
+                    readonly property real age: (clawd.beat * 3 + index * 3) % 6
+                    readonly property real gy: Math.round(6 - 4 * clawd.sip) - 1 - Math.floor(age)
+                    visible: clawd.hobby === "sip" && gy >= -clawd.roomAbove
+                    x: mug.x + (1 + index * 2 + Math.floor(age) % 2) * clawd.px
+                    y: gy * clawd.px
+                    width: clawd.px
+                    height: clawd.px
+                    color: "#E9E2D0"
+                    opacity: Math.max(0, 1 - age / 6)
+                }
+            }
+            Item {
+                visible: clawd.hobby === "fish"
+                readonly property int tipX: 18 + clawd.rodLen
+                readonly property int tipY: 6 - clawd.rodLen + (clawd.tug ? 1 : 0)
+                Repeater {
+                    model: clawd.rodLen
+                    Rectangle {
+                        required property int index
+                        x: (19 + index) * clawd.px
+                        y: (5 - index + (clawd.tug ? 1 : 0)) * clawd.px
+                        width: clawd.px
+                        height: clawd.px
+                        color: "#8B6B4A"
+                    }
+                }
+                Rectangle {
+                    x: parent.tipX * clawd.px
+                    y: (parent.tipY + 1) * clawd.px
+                    width: clawd.px
+                    height: Math.max(0, clawd.bobY - parent.tipY - 1) * clawd.px
+                    color: "#B5AE98"
+                }
+                Rectangle {
+                    x: (parent.tipX - 1) * clawd.px
+                    y: clawd.bobY * clawd.px
+                    width: clawd.px * 3
+                    height: clawd.px * 2
+                    color: "#E67E80"
+                    Rectangle {
+                        x: clawd.px
+                        width: clawd.px
+                        height: clawd.px
+                        color: "#E9E2D0"
+                    }
+                }
+                Rectangle {
+                    visible: clawd.tug && clawd.bobY + 2 < 12 + clawd.roomBelow
+                    x: (parent.tipX - 3) * clawd.px
+                    y: (clawd.bobY + 2) * clawd.px
+                    width: clawd.px * 7
+                    height: clawd.px
+                    color: "#56635F"
+                }
+            }
+        }
+        Repeater {
+            model: 3
+            Image {
+                required property int index
+                readonly property real since: clawd.restClock - clawd.snoreFrom - index * 1.5
+                readonly property real age: since % 4.5
+                readonly property bool big: age > 1.8
+                z: 2
+                visible: clawd.snoreFrom >= 0 && since >= 0 && (clawd.puff < 1 || clawd.puff > 2)
+                x: Math.round(clawd.snoreAt.x + (clawd.flipped && !clawd.inBed ? -1 : 1) * (age * 2.4 + Math.sin(age * 2.2) * 1.5)) * clawd.px
+                y: Math.max(-clawd.roomAbove, Math.round(clawd.snoreAt.y - age * 3.2)) * clawd.px
+                width: clawd.px * (big ? 5 : 4)
+                height: width
+                opacity: Math.max(0, 1 - age / 4.5)
+                source: Qt.resolvedUrl("../images/clawd-z-" + (big ? "l" : "s") + ".svg")
+                sourceSize: Qt.size(width, height)
+                smooth: false
+            }
+        }
+        Image {
+            z: 2
+            visible: clawd.frame === "clawd-nod-up" || clawd.waking >= 0 && clawd.waking < 0.65
+            x: clawd.px * 9
+            y: Math.max(-clawd.roomAbove * clawd.px, clawd.waking >= 0 ? -clawd.px * 8 - Math.round(clawd.jump * clawd.dpr) / clawd.dpr : -clawd.px * 5)
+            width: clawd.px
+            height: clawd.px * 5
+            source: Qt.resolvedUrl("../images/clawd-bang.svg")
+            sourceSize: Qt.size(width, height)
+            smooth: false
         }
         Timer {
             id: shyReturn
@@ -1065,7 +1358,7 @@ PlasmoidItem {
             id: walkway
             anchors.fill: parent
             hoverEnabled: true
-            readonly property bool onHim: containsMouse && mouseX >= sprite.x - sprite.px * 3 && mouseX <= sprite.x + sprite.width + sprite.px * 3
+            readonly property bool onHim: containsMouse && mouseX >= sprite.x + sprite.bodyX - sprite.px * 3 && mouseX <= sprite.x + sprite.bodyX + sprite.width + sprite.px * 3
             onEntered: sprite.pointerEntered()
             onExited: sprite.pointerLeft()
             onPositionChanged: sprite.pointerMoved(holder.globalX + mouseX, onHim)
