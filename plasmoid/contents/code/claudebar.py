@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Emit one JSON line with herdr agent counts and Claude rate limits."""
+"""Emit one JSON line with Claude agent counts (herdr and elsewhere) and rate limits."""
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import time
@@ -12,6 +13,9 @@ STALE_AFTER = 15 * 60
 HERDR = os.path.expanduser("~/.local/bin/herdr")
 CONTEXT_DIR = os.path.expanduser("~/.cache/claude-bar/context")
 CONTEXT_MAX_AGE = 6 * 3600
+AGENTS_DIR = os.path.expanduser("~/.cache/claude-bar/agents")
+ORCA_DB = os.path.expanduser("~/.config/orca/orchestration.db")
+RANK = {"blocked": 0, "working": 1, "idle": 2}
 SETTINGS_FILE = os.path.expanduser("~/.config/claude-bar/settings.json")
 MURAL_STATE = os.path.join(
     os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
@@ -80,15 +84,115 @@ def contexts(panes):
         except (OSError, ValueError):
             continue
         if now - entry.get("updated_at", 0) <= CONTEXT_MAX_AGE:
-            found[pane] = entry.get("pct")
+            found[pane] = entry
     return found
+
+
+def outside_herdr():
+    """Sessions the agent-presence hook records outside herdr (Orca, a plain terminal)."""
+    found = []
+    try:
+        names = os.listdir(AGENTS_DIR)
+    except OSError:
+        return found
+    now = time.time()
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(AGENTS_DIR, name)
+        try:
+            with open(path) as f:
+                entry = json.load(f)
+            pid = entry.get("pid")
+            if pid:
+                alive = os.path.exists(f"/proc/{pid}")
+            else:
+                alive = now - entry.get("updated_at", 0) < CONTEXT_MAX_AGE
+            if not alive:
+                os.remove(path)
+                continue
+        except (OSError, ValueError):
+            continue
+        session = name[: -len(".json")]
+        found.append(
+            {
+                "pane_id": f"session-{session}",
+                "agent_status": entry.get("status"),
+                "cwd": entry.get("cwd"),
+                "terminal_id": f"ext:{session}",
+                "host": entry.get("host"),
+                "handle": entry.get("terminal") or orca_handle(pid),
+            }
+        )
+    return found
+
+
+def orca_handle(pid):
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as f:
+            for var in f.read().split(b"\0"):
+                if var.startswith(b"ORCA_TERMINAL_HANDLE="):
+                    return var.split(b"=", 1)[1].decode()
+    except OSError:
+        return None
+    return None
+
+
+def orca_coordinators():
+    """Worker terminal handle to the coordinator handle of its live Orca run."""
+    try:
+        db = sqlite3.connect(f"file:{ORCA_DB}?mode=ro", uri=True, timeout=1)
+        try:
+            pairs = db.execute(
+                "select d.assignee_handle, r.coordinator_handle"
+                " from dispatch_contexts d join runs r on r.id = d.run_id"
+                " where d.assignee_handle is not null and r.coordinator_handle is not null"
+                " and d.status in ('pending', 'dispatched')"
+            ).fetchall()
+        finally:
+            db.close()
+    except sqlite3.Error:
+        return {}
+    return {worker: lead for worker, lead in pairs if worker != lead}
+
+
+def fold_teams(rows):
+    """Nest Orca workers under their coordinator; the coordinator shows the team's busiest status."""
+    leads = orca_coordinators()
+    by_handle = {r["handle"]: r for r in rows if r.get("handle")}
+    top = []
+    for row in rows:
+        lead = by_handle.get(leads.get(row.get("handle")))
+        if lead is not None:
+            row["detail"] = os.path.basename(row["cwd"].rstrip("/"))
+            lead.setdefault("workers", []).append(row)
+        else:
+            top.append(row)
+    for row in top:
+        workers = row.get("workers")
+        if workers:
+            busiest = min([row, *workers], key=lambda r: RANK.get(r["status"], 3))
+            row["team_status"] = busiest["status"]
+    return top
+
+
+def repo_of(cwd):
+    """The repo a worktree under ~/Repos/Worktrees/<repo>/<slug> belongs to, else the parent."""
+    parts = cwd.rstrip("/").split("/")
+    if "Worktrees" in parts[:-2]:
+        return parts[parts.index("Worktrees") + 1]
+    return parts[-2] if len(parts) > 1 else cwd
 
 
 def agents():
     try:
         listed = herdr("agent", "list")["agents"]
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        listed = None
+    outside = outside_herdr()
+    if listed is None and not outside:
         return None
+    listed = (listed or []) + outside
     workspaces, named_tabs = labels()
     ctx = contexts({a.get("pane_id") for a in listed})
     counts = {"working": 0, "blocked": 0, "idle": 0}
@@ -97,26 +201,35 @@ def agents():
         status = agent.get("agent_status")
         if status in counts:
             counts[status] += 1
-        rows.append(
-            {
-                "status": status,
-                "cwd": agent.get("cwd") or "",
-                "name": " · ".join(
-                    part
-                    for part in (
-                        workspaces.get(agent.get("workspace_id")),
-                        named_tabs.get(agent.get("tab_id")),
-                    )
-                    if part
-                ),
-                "terminal_id": agent.get("terminal_id"),
-                "ctx": ctx.get(agent.get("pane_id")),
-                "focused": agent.get("focused", False),
-            }
-        )
+        cwd = agent.get("cwd") or ""
+        entry = ctx.get(agent.get("pane_id")) or {}
+        row = {
+            "status": status,
+            "cwd": cwd,
+            "name": " · ".join(
+                part
+                for part in (
+                    workspaces.get(agent.get("workspace_id")),
+                    named_tabs.get(agent.get("tab_id")),
+                )
+                if part
+            ),
+            "terminal_id": agent.get("terminal_id"),
+            "ctx": entry.get("pct"),
+            "focused": agent.get("focused", False),
+        }
+        if agent.get("host"):
+            row["name"] = str(entry.get("name") or os.path.basename(cwd.rstrip("/")))
+            row["detail"] = f"{agent['host']} · {repo_of(cwd)}"
+            row["handle"] = agent.get("handle")
+        rows.append(row)
+    rows = fold_teams(rows)
     order = {"blocked": 0, "working": 1}
     rows.sort(
-        key=lambda a: (order.get(a["status"], 2), (a["name"] or a["cwd"]).lower())
+        key=lambda a: (
+            order.get(a.get("team_status") or a["status"], 2),
+            str(a["name"] or a["cwd"]).lower(),
+        )
     )
     return {**counts, "list": rows}
 

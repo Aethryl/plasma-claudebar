@@ -27,12 +27,14 @@ PlasmoidItem {
     readonly property real bottomRadius: Kirigami.Units.gridUnit * 1.1
 
     readonly property var agents: bar && bar.agents ? bar.agents : null
-    readonly property var activeAgents: agents ? agents.list.filter(a => a.status !== "idle") : []
-    readonly property var idleAgents: agents ? agents.list.filter(a => a.status === "idle") : []
+    readonly property var everyAgent: agents ? agents.list.reduce((all, a) => all.concat([a], a.workers || []), []) : []
+    property var openTeams: ({})
+    readonly property var activeAgents: agents ? unfold(agents.list.filter(a => (a.team_status || a.status) !== "idle")) : []
+    readonly property var idleAgents: agents ? unfold(agents.list.filter(a => (a.team_status || a.status) === "idle")) : []
     readonly property bool windowed: Plasmoid.formFactor === PlasmaCore.Types.Planar || Plasmoid.location === PlasmaCore.Types.Floating
     property var pendingSettings: ({})
     readonly property var settings: Object.assign({ warn: 70, critical: 85, notify: true, playful: false, outfits: "auto", outfit_fav: "pirate", outfit_events: true, outfit_seasons: true, outfit_wallpaper: true, outfit_random: true }, bar && bar.settings ? bar.settings : {}, pendingSettings)
-    readonly property string hotLevel: agents ? agents.list.reduce((worst, a) => {
+    readonly property string hotLevel: agents ? everyAgent.reduce((worst, a) => {
         const level = ctxLevel(a.ctx)
         return level === "crit" || worst === "crit" ? "crit" : level || worst
     }, "") : ""
@@ -108,7 +110,7 @@ PlasmoidItem {
     function levelsFor(status) {
         if (!agents)
             return []
-        return agents.list.filter(a => a.status === status)
+        return everyAgent.filter(a => a.status === status)
             .map(a => a.ctx === null || a.ctx === undefined ? -1 : a.ctx)
             .sort((a, b) => b - a)
             .map(ctxLevel)
@@ -130,7 +132,7 @@ PlasmoidItem {
         if (windowed || !agents)
             return
         const next = {}
-        for (const agent of agents.list) {
+        for (const agent of everyAgent) {
             const key = String(agent.terminal_id)
             const level = ctxLevel(agent.ctx)
             if (level === "crit") {
@@ -181,7 +183,26 @@ PlasmoidItem {
         return shortPath(path).replace(/\/[^/]*$/, "")
     }
 
+    function unfold(list) {
+        const out = []
+        for (const a of list) {
+            out.push(a)
+            if (a.workers && openTeams[a.terminal_id])
+                for (const w of a.workers)
+                    out.push(Object.assign({ depth: 1 }, w))
+        }
+        return out
+    }
+
+    function toggleTeam(terminalId) {
+        const next = Object.assign({}, openTeams)
+        next[terminalId] = !next[terminalId]
+        openTeams = next
+    }
+
     function focusAgent(terminalId) {
+        if (String(terminalId).startsWith("ext:"))
+            return
         executable.connectSource("\"$HOME/.local/bin/herdr\" agent focus " + terminalId)
         root.drooped = false
     }
@@ -1299,13 +1320,19 @@ PlasmoidItem {
 
         RowLayout {
             anchors.fill: parent
-            anchors.leftMargin: Kirigami.Units.smallSpacing * 1.5
+            anchors.leftMargin: Kirigami.Units.smallSpacing * 1.5 + (agentRow.agent.depth || 0) * Kirigami.Units.gridUnit
             anchors.rightMargin: Kirigami.Units.smallSpacing * 1.5
             spacing: Kirigami.Units.smallSpacing * 2
 
             Dot {
-                dotColor: root.levelColor(root.ctxLevel(agentRow.agent.ctx), root.statusColor(agentRow.agent.status))
-                pulse: agentRow.agent.status === "working"
+                dotColor: root.levelColor(root.ctxLevel(agentRow.agent.ctx), root.statusColor(agentRow.agent.team_status || agentRow.agent.status))
+                pulse: (agentRow.agent.team_status || agentRow.agent.status) === "working"
+            }
+            PlasmaComponents.Label {
+                visible: !!agentRow.agent.workers
+                text: (root.openTeams[agentRow.agent.terminal_id] ? "▾ " : "▸ ") + (agentRow.agent.workers ? agentRow.agent.workers.length : 0)
+                color: root.dim
+                font.pointSize: Kirigami.Theme.smallFont.pointSize
             }
             PlasmaComponents.Label {
                 text: agentRow.agent.name || root.project(agentRow.agent.cwd)
@@ -1315,7 +1342,7 @@ PlasmoidItem {
             }
             PlasmaComponents.Label {
                 Layout.fillWidth: true
-                text: agentRow.agent.name ? root.shortPath(agentRow.agent.cwd) : root.parentPath(agentRow.agent.cwd)
+                text: agentRow.agent.detail || (agentRow.agent.name ? root.shortPath(agentRow.agent.cwd) : root.parentPath(agentRow.agent.cwd))
                 color: root.dim
                 elide: Text.ElideLeft
                 horizontalAlignment: Text.AlignRight
@@ -1339,7 +1366,7 @@ PlasmoidItem {
             anchors.fill: parent
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
-            onClicked: root.focusAgent(agentRow.agent.terminal_id)
+            onClicked: agentRow.agent.workers ? root.toggleTeam(agentRow.agent.terminal_id) : root.focusAgent(agentRow.agent.terminal_id)
         }
     }
 
