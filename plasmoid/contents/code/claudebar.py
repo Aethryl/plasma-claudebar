@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Emit one JSON line with Claude agent counts (herdr and elsewhere) and rate limits."""
 
+import glob
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
 import time
+from datetime import datetime
 
 LIMITS_CACHE = os.path.expanduser("~/.cache/claude-bar/limits.json")
 STALE_AFTER = 15 * 60
@@ -16,6 +19,15 @@ CONTEXT_MAX_AGE = 6 * 3600
 AGENTS_DIR = os.path.expanduser("~/.cache/claude-bar/agents")
 ORCA_DB = os.path.expanduser("~/.config/orca/orchestration.db")
 RANK = {"blocked": 0, "working": 1, "idle": 2}
+SESSIONS_DIR = os.path.expanduser("~/.claude/sessions")
+PROJECTS_DIR = os.path.expanduser("~/.claude/projects")
+SUBAGENTS_DIR = os.path.expanduser("~/.cache/claude-bar/subagents")
+RUNNING_FOR = 120
+LONG_TOOL_FOR = 30 * 60
+DONE_FOR = 10 * 60
+FAILED_FOR = 30 * 60
+ORDER = ["waiting", "error", "working", "delegating", "done", "idle"]
+ROW_STATE = {"working": "working", "blocked": "waiting"}
 SETTINGS_FILE = os.path.expanduser("~/.config/claude-bar/settings.json")
 MURAL_STATE = os.path.join(
     os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
@@ -122,6 +134,7 @@ def outside_herdr():
                 "terminal_id": f"ext:{session}",
                 "host": entry.get("host"),
                 "handle": entry.get("terminal") or orca_handle(pid),
+                "pid": pid,
             }
         )
     return found
@@ -184,6 +197,232 @@ def repo_of(cwd):
     return parts[-2] if len(parts) > 1 else cwd
 
 
+def project_of(cwd):
+    parts = cwd.rstrip("/").split("/")
+    if "Worktrees" in parts[:-2]:
+        return repo_of(cwd)
+    return parts[-1] or cwd
+
+
+def read_json(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def sessions():
+    """Live Claude processes, one ~/.claude/sessions/<pid>.json each."""
+    try:
+        names = os.listdir(SESSIONS_DIR)
+    except OSError:
+        return []
+    found = []
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        entry = read_json(os.path.join(SESSIONS_DIR, name))
+        if (
+            isinstance(entry, dict)
+            and entry.get("sessionId")
+            and os.path.exists(f"/proc/{entry.get('pid')}")
+        ):
+            found.append(entry)
+    return found
+
+
+def subagent_records(live):
+    """What the agent-presence hook saw per subagent; records of ended sessions are dropped."""
+    try:
+        names = os.listdir(SUBAGENTS_DIR)
+    except OSError:
+        return {}
+    found = {}
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(SUBAGENTS_DIR, name)
+        entry = read_json(path)
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("session") not in live:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            continue
+        found[name[: -len(".json")]] = entry
+    return found
+
+
+def subagent_dir(session, cwd):
+    path = os.path.join(PROJECTS_DIR, re.sub(r"[^A-Za-z0-9]", "-", cwd), session)
+    if not os.path.isdir(path):
+        matches = glob.glob(os.path.join(PROJECTS_DIR, "*", session))
+        path = matches[0] if matches else path
+    return os.path.join(path, "subagents")
+
+
+def started_at(transcript):
+    try:
+        with open(transcript) as f:
+            stamp = json.loads(f.readline()).get("timestamp")
+        return datetime.fromisoformat(stamp).timestamp()
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
+def ended_in_error(transcript):
+    try:
+        with open(transcript, "rb") as f:
+            f.seek(max(0, os.fstat(f.fileno()).st_size - 16384))
+            lines = f.read().splitlines()
+    except OSError:
+        return False
+    for raw in reversed(lines):
+        try:
+            entry = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(entry, dict) and entry.get("type") == "assistant":
+            return bool(entry.get("isApiErrorMessage"))
+    return False
+
+
+def subagent_state(meta, record, modified, transcript, now):
+    hooked = record.get("status")
+    seen = record.get("updated_at", 0)
+    if meta.get("finished") or hooked == "done":
+        if hooked == "failed" or ended_in_error(transcript):
+            return "error"
+        return "done" if now - modified <= DONE_FOR else None
+    if hooked == "failed":
+        return "error"
+    if hooked == "blocked" and seen + 2 >= modified:
+        return "waiting"
+    if now - modified <= RUNNING_FOR:
+        return "working"
+    if hooked == "working" and seen + 2 >= modified and now - seen <= LONG_TOOL_FOR:
+        return "working"
+    return None
+
+
+def subagents(session, cwd, records, now):
+    """A session's subagents that are running, need you, or ended a short while ago."""
+    folder = subagent_dir(session, cwd)
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return []
+    found = []
+    for name in names:
+        if not (name.startswith("agent-") and name.endswith(".meta.json")):
+            continue
+        agent = name[len("agent-") : -len(".meta.json")]
+        transcript = os.path.join(folder, f"agent-{agent}.jsonl")
+        record = records.get(agent) or {}
+        try:
+            modified = os.stat(transcript).st_mtime
+        except OSError:
+            continue
+        if now - max(modified, record.get("updated_at", 0)) > FAILED_FOR:
+            continue
+        meta = read_json(os.path.join(folder, name))
+        if not isinstance(meta, dict):
+            continue
+        state = subagent_state(meta, record, modified, transcript, now)
+        if not state:
+            continue
+        need = ""
+        if state == "waiting":
+            need = (
+                "question" if record.get("tool") == "AskUserQuestion" else "permission"
+            )
+        elif state == "error":
+            need = "failed"
+        found.append(
+            {
+                "id": agent,
+                "type": meta.get("agentType"),
+                "model": meta.get("model"),
+                "description": meta.get("description") or "",
+                "status": state,
+                "need": need,
+                "tool": record.get("tool") or "",
+                "ask": record.get("ask") or "",
+                "started_at": started_at(transcript),
+                "updated_at": max(modified, record.get("updated_at", 0)),
+            }
+        )
+    found.sort(key=lambda s: (ORDER.index(s["status"]), -(s["started_at"] or 0)))
+    return found
+
+
+def fleet(rows):
+    """Orchestrators (sessions, herdr panes, hook rows) with their subagents and totals."""
+    now = time.time()
+    live = sessions()
+    records = subagent_records({s["sessionId"] for s in live})
+    by_pid = {r["pid"]: r for r in rows if r.get("pid")}
+    claimed = set()
+    found = []
+    for entry in live:
+        cwd = entry.get("cwd") or ""
+        row = by_pid.get(entry.get("pid")) or next(
+            (
+                r
+                for r in rows
+                if not r.get("pid") and id(r) not in claimed and r.get("cwd") == cwd
+            ),
+            None,
+        )
+        if row is not None:
+            claimed.add(id(row))
+            status = ROW_STATE.get(row.get("status"), "idle")
+        else:
+            status = "working" if entry.get("status") == "busy" else "idle"
+        subs = subagents(entry["sessionId"], cwd, records, now)
+        if status == "idle" and any(
+            s["status"] in ("working", "waiting") for s in subs
+        ):
+            status = "delegating"
+        found.append((status, cwd, str(entry.get("name") or ""), row or {}, subs))
+    for row in rows:
+        if id(row) not in claimed:
+            status = ROW_STATE.get(row.get("status"), "idle")
+            found.append((status, row.get("cwd") or "", "", row, []))
+    orchestrators = dict.fromkeys(("working", "delegating", "waiting", "idle"), 0)
+    totals = dict.fromkeys(("working", "waiting", "error", "done"), 0)
+    projects = []
+    for status, cwd, name, row, subs in found:
+        orchestrators[status] += 1
+        for sub in subs:
+            totals[sub["status"]] += 1
+        rank = min(ORDER.index(s) for s in [status, *(s["status"] for s in subs)])
+        session = name or str(row.get("name") or "")
+        projects.append(
+            (
+                (rank, project_of(cwd).lower(), session.lower()),
+                {
+                    "name": project_of(cwd),
+                    "session": session,
+                    "status": status,
+                    "cwd": cwd,
+                    "terminal_id": row.get("terminal_id"),
+                    "ctx": row.get("ctx"),
+                    "subagents": subs,
+                },
+            )
+        )
+    projects.sort(key=lambda p: p[0])
+    return {
+        "orchestrators": {**orchestrators, "total": len(projects)},
+        "subagents": {**totals, "total": sum(totals.values())},
+        "projects": [p for _, p in projects],
+    }
+
+
 def agents():
     try:
         listed = herdr("agent", "list")["agents"]
@@ -217,6 +456,7 @@ def agents():
             "terminal_id": agent.get("terminal_id"),
             "ctx": entry.get("pct"),
             "focused": agent.get("focused", False),
+            "pid": agent.get("pid"),
         }
         if agent.get("host"):
             row["name"] = str(entry.get("name") or os.path.basename(cwd.rstrip("/")))
@@ -320,10 +560,18 @@ def save(key, raw):
 if len(sys.argv) == 4 and sys.argv[1] == "set":
     save(sys.argv[2], sys.argv[3])
 else:
+    found = agents()
     print(
         json.dumps(
             {
-                "agents": agents(),
+                "agents": found,
+                "fleet": fleet(
+                    [
+                        w
+                        for a in (found or {}).get("list", [])
+                        for w in [a, *a.get("workers", [])]
+                    ]
+                ),
                 **limits(),
                 "settings": settings(),
                 "wallpaper": wallpaper(),
