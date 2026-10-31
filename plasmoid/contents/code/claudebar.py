@@ -5,14 +5,20 @@ import glob
 import json
 import os
 import re
+import socket
 import sqlite3
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 LIMITS_CACHE = os.path.expanduser("~/.cache/claude-bar/limits.json")
 STALE_AFTER = 15 * 60
+PACE = {
+    "five_hour": ("~/.cache/claude-bar/pace.json", 5 * 3600, 30 * 60, 5 * 60, 3600),
+    "seven_day": ("~/.cache/claude-bar/pace-7d.json", 7 * 86400, 86400, 3600, 86400),
+}
+BURN_SPAN = {"five_hour": 30 * 60, "seven_day": 7 * 86400}
 HERDR = os.path.expanduser("~/.local/bin/herdr")
 CONTEXT_DIR = os.path.expanduser("~/.cache/claude-bar/context")
 CONTEXT_MAX_AGE = 6 * 3600
@@ -29,6 +35,12 @@ FAILED_FOR = 30 * 60
 ORDER = ["waiting", "error", "working", "delegating", "done", "idle"]
 ROW_STATE = {"working": "working", "blocked": "waiting"}
 SETTINGS_FILE = os.path.expanduser("~/.config/claude-bar/settings.json")
+REMOTE_LIVE = os.path.expanduser("~/.cache/claude-bar/remote.json")
+REMOTE_FLEET = os.path.expanduser("~/.cache/claude-bar/fleet.json")
+REMOTE_STALE = 20
+REMOTE_TRUST = 60
+REMOTE_FORGET = 10 * 60
+REMOTE_FLEET_STALE = 45 * 60
 MURAL_STATE = os.path.join(
     os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
     "mural",
@@ -359,8 +371,64 @@ def subagents(session, cwd, records, now):
     return found
 
 
+def remote_projects(now):
+    """Last good agent list per Orca environment; stale hosts keep it, and turn idle after REMOTE_TRUST."""
+    cache = read_json(REMOTE_LIVE)
+    if not isinstance(cache, dict) or now - cache.get("at", 0) > REMOTE_FORGET:
+        return []
+    found = []
+    for host in (cache.get("hosts") or {}).values():
+        age = now - host.get("fetched_at", 0)
+        if age > REMOTE_FORGET:
+            continue
+        stale = not host.get("ok") or age > REMOTE_STALE
+        for project in host.get("projects") or []:
+            project = {**project, "stale": stale}
+            if age > REMOTE_TRUST:
+                project.update(status="idle", subagents=[])
+            found.append(project)
+    return found
+
+
+def remote_cost(cost):
+    days = cost.get("days") or {}
+    today = datetime.now().date()
+
+    def since(n):
+        first = (today - timedelta(days=n - 1)).isoformat()
+        return round(sum(v for d, v in days.items() if d >= first), 2)
+
+    return {
+        "today": since(1),
+        "week": since(7),
+        "month": since(30),
+        "daily": [
+            {"day": d, "cost": round(days.get(d, 0), 2)}
+            for d in ((today - timedelta(days=n)).isoformat() for n in range(6, -1, -1))
+        ],
+        "models": cost.get("models") or [],
+        "projects": cost.get("projects") or [],
+        "unpriced": cost.get("unpriced") or [],
+    }
+
+
+def remote_stats(now):
+    cache = read_json(REMOTE_FLEET)
+    if not isinstance(cache, dict):
+        return []
+    found = []
+    for name, stats in sorted((cache.get("hosts") or {}).items()):
+        stats = {k: v for k, v in stats.items() if k not in ("history", "cost")}
+        cost = (cache["hosts"][name] or {}).get("cost") or {}
+        stale = stats.get("stale") or now - stats.get("at", 0) > REMOTE_FLEET_STALE
+        found.append(
+            {**stats, "host": name, "stale": bool(stale), "cost": remote_cost(cost)}
+        )
+    return found
+
+
 def fleet(rows):
-    """Orchestrators (sessions, herdr panes, hook rows) with their subagents and totals."""
+    """Orchestrators (sessions, herdr panes, hook rows, remote Orca hosts) with their subagents and totals."""
     now = time.time()
     live = sessions()
     records = subagent_records({s["sessionId"] for s in live})
@@ -414,6 +482,18 @@ def fleet(rows):
                     "subagents": subs,
                 },
             )
+        )
+    for remote in remote_projects(now):
+        status = remote["status"]
+        orchestrators[status] += 1
+        for sub in remote["subagents"]:
+            totals[sub["status"]] += 1
+        rank = min(
+            ORDER.index(s)
+            for s in [status, *(s["status"] for s in remote["subagents"])]
+        )
+        projects.append(
+            ((rank, remote["name"].lower(), remote["session"].lower()), remote)
         )
     projects.sort(key=lambda p: p[0])
     return {
@@ -481,6 +561,57 @@ def window(rate_limits, key):
     return {"pct": entry["used_percentage"], "resets_at": entry.get("resets_at")}
 
 
+def squeeze(samples):
+    """Keep only the ends of each run of equal pct."""
+    out = []
+    for i, (t, p) in enumerate(samples):
+        if 0 < i < len(samples) - 1 and samples[i - 1][1] == p == samples[i + 1][1]:
+            continue
+        out.append([round(t), p])
+    return out
+
+
+def pace(win, key, now):
+    """Rate, ETA and projection the way the statusline computes them."""
+    path, length, span, min_age, unit = PACE[key]
+    pct, resets_at = win["pct"], win["resets_at"]
+    if not resets_at:
+        return
+    start = resets_at - length
+    stored = read_json(os.path.expanduser(path)) or {}
+    samples = (
+        stored.get("samples") or [] if stored.get("resets_at") == resets_at else []
+    )
+    samples = [s for s in samples if start <= s[0] <= now]
+    recent = [s for s in samples if now - s[0] <= span]
+    if len(recent) >= 2 and now - recent[0][0] >= min_age:
+        t0, p0 = recent[0]
+    else:
+        t0, p0 = start, 0
+    rate = (pct - p0) / ((now - t0) / unit) if now > t0 else 0.0
+    left = resets_at - now
+    hits_in = (100 - pct) / rate * unit if rate > 0 and pct < 100 else None
+    burn_from = now - BURN_SPAN[key]
+    before = [p for t, p in samples if t <= burn_from]
+    if before:
+        base = before[-1]
+    elif start >= burn_from:
+        base = 0
+    else:
+        base = samples[0][1] if samples else pct
+    win.update(
+        start=start,
+        rate=round(rate, 2),
+        hits_in=round(hits_in) if hits_in is not None and hits_in < left else None,
+        projected=round(min(100.0, pct + rate * left / unit), 1),
+        limited_at=next((t for t, p in samples if p >= 100), now)
+        if pct >= 100
+        else None,
+        burned=max(0, pct - base),
+        samples=squeeze(samples),
+    )
+
+
 def limits():
     try:
         with open(LIMITS_CACHE) as f:
@@ -491,10 +622,12 @@ def limits():
     now = time.time()
     five = window(rate_limits, "five_hour")
     seven = window(rate_limits, "seven_day")
-    for w in (five, seven):
+    for key, w in (("five_hour", five), ("seven_day", seven)):
         if w and w["resets_at"] and w["resets_at"] < now:
             w["pct"] = 0
             w["resets_at"] = None
+        if w:
+            pace(w, key, now)
     return {
         "five_hour": five,
         "seven_day": seven,
@@ -574,6 +707,8 @@ else:
                 ),
                 **limits(),
                 "settings": settings(),
+                "remote": remote_stats(time.time()),
+                "hostname": socket.gethostname().split(".")[0],
                 "wallpaper": wallpaper(),
                 "music": music(),
             }

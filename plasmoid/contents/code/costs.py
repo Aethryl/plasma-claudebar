@@ -6,6 +6,7 @@ import os
 import time
 import urllib.request
 from datetime import date, datetime, timedelta
+from functools import cache
 from pathlib import Path
 
 PROJECTS = Path.home() / ".claude" / "projects"
@@ -14,7 +15,12 @@ STATE = CACHE_DIR / "costs.json"
 PRICES = CACHE_DIR / "prices.json"
 PRICES_URL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 PRICES_MAX_AGE = 24 * 3600
+LIMITS = CACHE_DIR / "limits.json"
 KEEP_DAYS = 35
+SLOT = 300
+SLOT_KEEP = 8 * 86400
+HALF_HOUR = 30 * 60
+WEEK = 7 * 86400
 WEB_SEARCH_COST = 0.01
 
 
@@ -75,12 +81,22 @@ def cost_of(usage: dict, price: dict) -> float:
     )
 
 
-def local_day(timestamp: str) -> str | None:
+def moment_of(timestamp: str) -> datetime | None:
     try:
-        moment = datetime.fromisoformat(timestamp)
-    except (AttributeError, ValueError):
+        return datetime.fromisoformat(timestamp).astimezone()
+    except (AttributeError, TypeError, ValueError):
         return None
-    return moment.astimezone().date().isoformat()
+
+
+@cache
+def project_of(cwd: str) -> str:
+    parts = cwd.rstrip("/").split("/")
+    if "Worktrees" in parts[:-2]:
+        return parts[parts.index("Worktrees") + 1]
+    for depth in range(len(parts), 1, -1):
+        if os.path.exists("/".join(parts[:depth] + [".git"])):
+            return parts[depth - 1]
+    return parts[-1] or "~"
 
 
 def scan(state: dict, table: dict) -> None:
@@ -88,6 +104,8 @@ def scan(state: dict, table: dict) -> None:
     files = state.setdefault("files", {})
     seen = state.setdefault("seen", {})
     days = state.setdefault("days", {})
+    slots = state.setdefault("slots", {})
+    slot_cutoff = time.time() - SLOT_KEEP
     for path in PROJECTS.glob("**/*.jsonl"):
         try:
             stat = path.stat()
@@ -115,23 +133,50 @@ def scan(state: dict, table: dict) -> None:
             message = entry.get("message") or {}
             usage = message.get("usage")
             model = message.get("model")
-            day = local_day(entry.get("timestamp"))
-            if not usage or not model or not day or model.startswith("<"):
+            moment = moment_of(entry.get("timestamp"))
+            if not usage or not model or not moment or model.startswith("<"):
                 continue
             ident = f"{message.get('id')}:{entry.get('requestId')}"
             if ident in seen:
                 continue
+            day = moment.date().isoformat()
             seen[ident] = day
             price = price_for(model, table)
             if price is None:
                 continue
+            cost = cost_of(usage, price)
             bucket = days.setdefault(day, {})
-            bucket[model] = bucket.get(model, 0) + cost_of(usage, price)
+            bucket[model] = bucket.get(model, 0) + cost
+            stamp = moment.timestamp()
+            if stamp >= slot_cutoff:
+                per = slots.setdefault(str(int(stamp // SLOT * SLOT)), {})
+                name = project_of(entry.get("cwd") or "")
+                per[name] = per.get(name, 0) + cost
         files[key] = offset + end
     oldest = (date.today() - timedelta(days=KEEP_DAYS)).isoformat()
     state["days"] = {d: v for d, v in days.items() if d >= oldest}
     state["seen"] = {k: d for k, d in seen.items() if d >= oldest}
     state["files"] = {k: v for k, v in files.items() if Path(k).exists()}
+    state["slots"] = {k: v for k, v in slots.items() if int(k) >= slot_cutoff}
+
+
+def projects_since(slots: dict, since: float) -> list[dict]:
+    totals: dict[str, float] = {}
+    for key, per in slots.items():
+        if int(key) + SLOT > since:
+            for name, cost in per.items():
+                totals[name] = totals.get(name, 0) + cost
+    return [
+        {"name": n, "cost": round(c, 4)}
+        for n, c in sorted(totals.items(), key=lambda kv: -kv[1])
+        if c > 0
+    ]
+
+
+def week_start(now: float) -> float:
+    week = (load(LIMITS, {}).get("rate_limits") or {}).get("seven_day") or {}
+    resets_at = week.get("resets_at") or 0
+    return resets_at - WEEK if resets_at > now else now - WEEK
 
 
 def summary(state: dict) -> dict:
@@ -141,6 +186,7 @@ def summary(state: dict) -> dict:
     def total(day: date) -> float:
         return sum(days.get(day.isoformat(), {}).values())
 
+    now = time.time()
     week = [today - timedelta(days=n) for n in range(6, -1, -1)]
     month = [today - timedelta(days=n) for n in range(30)]
     models: dict[str, float] = {}
@@ -156,12 +202,18 @@ def summary(state: dict) -> dict:
             {"model": m, "cost": round(c, 2)}
             for m, c in sorted(models.items(), key=lambda kv: -kv[1])
         ],
-        "updated": time.time(),
+        "projects": {
+            "half_hour": projects_since(state["slots"], now - HALF_HOUR),
+            "week": projects_since(state["slots"], week_start(now)),
+        },
+        "updated": now,
     }
 
 
 def main() -> None:
     state = load(STATE, {})
+    if "slots" not in state:
+        state = {}
     scan(state, prices())
     save(STATE, state)
     print(json.dumps(summary(state)))
