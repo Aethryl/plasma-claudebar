@@ -1403,15 +1403,15 @@ PlasmoidItem {
         readonly property real dpr: Screen.devicePixelRatio || 1
         readonly property real hair: Math.max(1, Math.round(dpr)) / dpr
         readonly property real start: win && win.start !== undefined ? win.start : 0
-        readonly property real end: win ? win.resets_at : 1
+        readonly property real end: win && win.resets_at ? win.resets_at : 1
         readonly property real nowT: Math.min(end, Math.max(start, root.now))
-        readonly property real pct: win ? Math.min(100, win.pct) : 0
+        readonly property real pct: win && win.pct !== undefined ? Math.min(100, win.pct) : 0
         readonly property color accent: root.pctColor(pct)
         readonly property bool limited: !!win && win.pct >= 100
-        readonly property bool hits: !!win && !limited && win.hits_in !== null && root.etaReady(key, win)
+        readonly property bool hits: !!win && !limited && win.hits_in !== undefined && win.hits_in !== null && root.etaReady(key, win)
         readonly property bool rising: !!win && !limited && win.rate > 0
         readonly property real hitT: limited ? Math.min(end, win.limited_at || nowT) : hits ? Math.min(end, nowT + win.hits_in) : end
-        readonly property real endPct: hits ? 100 : win ? win.projected : 0
+        readonly property real endPct: hits ? 100 : win && win.projected !== undefined ? win.projected : 0
         readonly property color proj: hits ? root.etaColor(key, win.hits_in) : root.dim
         readonly property color hatch: limited || hits && root.etaCritical(key, win.hits_in) ? root.critical : root.warning
         readonly property real padL: Kirigami.Units.gridUnit * 1.4
