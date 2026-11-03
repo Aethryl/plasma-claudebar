@@ -17,6 +17,7 @@ PlasmoidItem {
     readonly property string remoteScript: "python3 '" + Qt.resolvedUrl("../code/remote.py").toString().replace("file://", "") + "'"
     readonly property string remoteLive: remoteScript + " live"
     readonly property string remoteFleet: "setsid -f " + remoteScript + " fleet >/dev/null 2>&1"
+    readonly property string remoteStop: "setsid -f " + remoteScript + " stop >/dev/null 2>&1"
     readonly property var remoteHosts: bar && bar.remote ? bar.remote.slice(0, 4) : []
     readonly property var remoteCosts: remoteHosts.filter(h => !!h.cost).map(h => Object.assign({ host: h.host, stale: !!h.stale }, h.cost))
     readonly property bool remoteStale: remoteCosts.some(h => h.stale)
@@ -279,6 +280,8 @@ PlasmoidItem {
         triggeredOnStart: true
         onTriggered: executable.connectSource(root.remoteLive)
     }
+
+    Component.onDestruction: if (!root.windowed) executable.connectSource(root.remoteStop)
 
     Timer {
         interval: 15 * 60000
@@ -1644,7 +1647,9 @@ PlasmoidItem {
         property string title
         property string sub
         property string burnTitle
+        property string windowTitle: "This window"
         property var win
+        property var window: null
         property var spend: []
         readonly property bool open: !!root.openLimits[key]
         readonly property bool paced: !!win && win.rate !== undefined
@@ -1674,6 +1679,41 @@ PlasmoidItem {
             return spend.map(p => ({ name: p.name, host: p.host || "", stale: !!p.stale, value: p.cost / total * win.burned })).filter(p => p.value >= 0.5).sort((a, b) => b.value - a.value).slice(0, root.bothOpen ? 3 : 5)
         }
         readonly property real peak: Math.max(0.01, ...burners.map(b => b.value))
+        readonly property var windowRows: {
+            if (!window || !win || !(pct > 0))
+                return []
+            const list = window.projects || []
+            const total = list.reduce((sum, p) => sum + p.cost, 0)
+            const scaled = total > 0 ? list.map(p => ({ name: p.name, host: p.host || "", stale: !!p.stale, value: p.cost / total * pct })) : []
+            const big = scaled.filter(p => p.value >= 0.5)
+            const shown = big.slice(0, 6)
+            const rest = big.slice(6).concat(scaled.filter(p => p.value < 0.5))
+            const restValue = rest.reduce((sum, p) => sum + p.value, 0)
+            if (rest.length > 0 && restValue >= 0.5)
+                shown.push({ name: rest.length + " more", host: "", stale: false, value: restValue })
+            const other = pct - scaled.reduce((sum, p) => sum + p.value, 0)
+            if (other >= 0.5)
+                shown.push({ name: "unattributed", host: "", stale: false, value: other })
+            return shown
+        }
+        readonly property real windowPeak: Math.max(0.01, ...windowRows.map(r => r.value))
+        readonly property var windowModels: {
+            if (!window || !win || !(pct > 0))
+                return []
+            const list = window.models || []
+            const total = list.reduce((sum, m) => sum + m.cost, 0)
+            if (total <= 0)
+                return []
+            const grouped = {}
+            list.forEach(m => {
+                const family = (/opus|sonnet|haiku/.exec(m.model) || [m.model.replace(/^claude-/, "")])[0]
+                grouped[family] = (grouped[family] || 0) + m.cost / total * pct
+            })
+            return Object.keys(grouped).map(n => ({ name: n, value: grouped[n] })).filter(m => m.value >= 0.5).sort((x, y) => y.value - x.value)
+        }
+        function modelColor(name) {
+            return name === "opus" ? root.active : name === "sonnet" ? root.warning : name === "haiku" ? root.ok : root.dim
+        }
         Layout.fillWidth: true
         spacing: 0
         opacity: root.bar && root.bar.stale ? 0.5 : 1
@@ -1787,6 +1827,62 @@ PlasmoidItem {
                     wrapMode: Text.WordWrap
                 }
                 RowLayout {
+                    visible: lim.windowRows.length > 0
+                    Layout.fillWidth: true
+                    Layout.topMargin: Kirigami.Units.smallSpacing / 2
+                    spacing: Kirigami.Units.smallSpacing
+                    Heading {
+                        Layout.fillWidth: true
+                        text: lim.windowTitle
+                        elide: Text.ElideRight
+                    }
+                    PlasmaComponents.Label {
+                        text: "% of limit · est."
+                        color: root.dim
+                        font.pointSize: Kirigami.Theme.smallFont.pointSize
+                    }
+                }
+                BurnGrid {
+                    visible: lim.windowRows.length > 0
+                    rows: lim.windowRows
+                    peak: lim.windowPeak
+                    tone: lim.accent
+                    plain: true
+                }
+                RowLayout {
+                    visible: lim.windowModels.length > 0
+                    Layout.fillWidth: true
+                    spacing: 2
+                    Repeater {
+                        model: lim.windowModels
+                        delegate: Rectangle {
+                            required property var modelData
+                            required property int index
+                            Layout.fillWidth: true
+                            Layout.preferredWidth: Math.max(1, modelData.value)
+                            implicitHeight: Kirigami.Units.smallSpacing * 1.25
+                            radius: height / 2
+                            color: lim.modelColor(modelData.name)
+                        }
+                    }
+                }
+                Flow {
+                    visible: lim.windowModels.length > 0
+                    Layout.fillWidth: true
+                    spacing: Kirigami.Units.smallSpacing * 2
+                    Repeater {
+                        model: lim.windowModels
+                        delegate: PlasmaComponents.Label {
+                            required property var modelData
+                            required property int index
+                            text: "<font color='" + lim.modelColor(modelData.name) + "'>●</font> " + modelData.name + " " + Math.round(modelData.value)
+                            textFormat: Text.StyledText
+                            color: root.dim
+                            font.pointSize: Kirigami.Theme.smallFont.pointSize
+                        }
+                    }
+                }
+                RowLayout {
                     visible: lim.burners.length > 0
                     Layout.fillWidth: true
                     Layout.topMargin: Kirigami.Units.smallSpacing / 2
@@ -1802,65 +1898,76 @@ PlasmoidItem {
                         font.pointSize: Kirigami.Theme.smallFont.pointSize
                     }
                 }
-                GridLayout {
+                BurnGrid {
                     visible: lim.burners.length > 0
-                    Layout.fillWidth: true
-                    columns: 3
-                    columnSpacing: Kirigami.Units.smallSpacing * 2
-                    rowSpacing: Kirigami.Units.smallSpacing / 2
-                    Repeater {
-                        model: lim.burners
-                        delegate: RowLayout {
-                            required property var modelData
-                            required property int index
-                            Layout.row: index
-                            Layout.column: 0
-                            Layout.maximumWidth: Kirigami.Units.gridUnit * 9
-                            spacing: Kirigami.Units.smallSpacing
-                            opacity: modelData.stale ? 0.6 : 1
-                            PlasmaComponents.Label {
-                                Layout.maximumWidth: Kirigami.Units.gridUnit * 6
-                                text: modelData.name
-                                font.pointSize: Kirigami.Theme.smallFont.pointSize
-                                elide: Text.ElideRight
-                            }
-                            HostTag {
-                                visible: !!modelData.host
-                                host: modelData.host || ""
-                            }
-                        }
-                    }
-                    Repeater {
-                        model: lim.burners
-                        delegate: Item {
-                            required property var modelData
-                            required property int index
-                            Layout.row: index
-                            Layout.column: 1
-                            Layout.fillWidth: true
-                            implicitHeight: Kirigami.Units.smallSpacing * 1.25
-                            Rectangle {
-                                width: Math.max(height, parent.width * modelData.value / lim.peak)
-                                height: parent.height
-                                radius: height / 2
-                                color: Qt.alpha(lim.accent, 0.7)
-                            }
-                        }
-                    }
-                    Repeater {
-                        model: lim.burners
-                        delegate: PlasmaComponents.Label {
-                            required property var modelData
-                            required property int index
-                            Layout.row: index
-                            Layout.column: 2
-                            Layout.alignment: Qt.AlignRight
-                            text: "+" + Math.round(modelData.value)
-                            color: root.dim
-                            font.pointSize: Kirigami.Theme.smallFont.pointSize
-                        }
-                    }
+                    rows: lim.burners
+                    peak: lim.peak
+                    tone: lim.accent
                 }
+            }
+        }
+    }
+
+    component BurnGrid: GridLayout {
+        id: grid
+        property var rows: []
+        property real peak: 0.01
+        property color tone: root.dim
+        property bool plain: false
+        Layout.fillWidth: true
+        columns: 3
+        columnSpacing: Kirigami.Units.smallSpacing * 2
+        rowSpacing: Kirigami.Units.smallSpacing / 2
+        Repeater {
+            model: grid.rows
+            delegate: RowLayout {
+                required property var modelData
+                required property int index
+                Layout.row: index
+                Layout.column: 0
+                Layout.maximumWidth: Kirigami.Units.gridUnit * 9
+                spacing: Kirigami.Units.smallSpacing
+                opacity: modelData.stale ? 0.6 : 1
+                PlasmaComponents.Label {
+                    Layout.maximumWidth: Kirigami.Units.gridUnit * 6
+                    text: modelData.name
+                    font.pointSize: Kirigami.Theme.smallFont.pointSize
+                    elide: Text.ElideRight
+                }
+                HostTag {
+                    visible: !!modelData.host
+                    host: modelData.host || ""
+                }
+            }
+        }
+        Repeater {
+            model: grid.rows
+            delegate: Item {
+                required property var modelData
+                required property int index
+                Layout.row: index
+                Layout.column: 1
+                Layout.fillWidth: true
+                implicitHeight: Kirigami.Units.smallSpacing * 1.25
+                Rectangle {
+                    width: Math.max(height, parent.width * modelData.value / grid.peak)
+                    height: parent.height
+                    radius: height / 2
+                    color: Qt.alpha(grid.tone, 0.7)
+                }
+            }
+        }
+        Repeater {
+            model: grid.rows
+            delegate: PlasmaComponents.Label {
+                required property var modelData
+                required property int index
+                Layout.row: index
+                Layout.column: 2
+                Layout.alignment: Qt.AlignRight
+                text: (grid.plain ? "" : "+") + Math.round(modelData.value)
+                color: root.dim
+                font.pointSize: Kirigami.Theme.smallFont.pointSize
             }
         }
     }
@@ -2103,6 +2210,12 @@ PlasmoidItem {
                 text: subRow.sub.description
                 elide: Text.ElideRight
                 font.pointSize: Kirigami.Theme.smallFont.pointSize
+            }
+            PlasmaComponents.Label {
+                visible: subRow.need === "" && subRow.sub.status === "working" && !!subRow.sub.tool
+                text: subRow.sub.tool || ""
+                color: root.dim
+                font.pointSize: Kirigami.Theme.smallFont.pointSize * 0.85
             }
             PlasmaComponents.Label {
                 visible: subRow.need !== ""
@@ -2473,6 +2586,8 @@ PlasmoidItem {
                                 title: "Session"
                                 sub: "5h window"
                                 burnTitle: "Burning this half hour"
+                                windowTitle: "This window"
+                                window: root.costs && root.costs.window ? root.costs.window.five_hour : null
                                 win: root.bar ? root.bar.five_hour : null
                                 spend: root.costs && root.costs.projects ? root.costs.projects.half_hour : []
                             }

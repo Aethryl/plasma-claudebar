@@ -16,11 +16,14 @@ PRICES = CACHE_DIR / "prices.json"
 PRICES_URL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 PRICES_MAX_AGE = 24 * 3600
 LIMITS = CACHE_DIR / "limits.json"
+FLEET = CACHE_DIR / "fleet.json"
 KEEP_DAYS = 35
 SLOT = 300
 SLOT_KEEP = 8 * 86400
 HALF_HOUR = 30 * 60
 WEEK = 7 * 86400
+SESSION = 5 * 3600
+FLEET_STALE = 45 * 60
 WEB_SEARCH_COST = 0.01
 
 
@@ -105,6 +108,7 @@ def scan(state: dict, table: dict) -> None:
     seen = state.setdefault("seen", {})
     days = state.setdefault("days", {})
     slots = state.setdefault("slots", {})
+    model_slots = state.setdefault("model_slots", {})
     slot_cutoff = time.time() - SLOT_KEEP
     for path in PROJECTS.glob("**/*.jsonl"):
         try:
@@ -152,25 +156,100 @@ def scan(state: dict, table: dict) -> None:
                 per = slots.setdefault(str(int(stamp // SLOT * SLOT)), {})
                 name = project_of(entry.get("cwd") or "")
                 per[name] = per.get(name, 0) + cost
+                by_model = model_slots.setdefault(str(int(stamp // SLOT * SLOT)), {})
+                by_model[model] = by_model.get(model, 0) + cost
         files[key] = offset + end
     oldest = (date.today() - timedelta(days=KEEP_DAYS)).isoformat()
     state["days"] = {d: v for d, v in days.items() if d >= oldest}
     state["seen"] = {k: d for k, d in seen.items() if d >= oldest}
     state["files"] = {k: v for k, v in files.items() if Path(k).exists()}
     state["slots"] = {k: v for k, v in slots.items() if int(k) >= slot_cutoff}
+    state["model_slots"] = {
+        k: v for k, v in model_slots.items() if int(k) >= slot_cutoff
+    }
 
 
-def projects_since(slots: dict, since: float) -> list[dict]:
+def totals_since(slots: dict, since: float) -> dict[str, float]:
     totals: dict[str, float] = {}
     for key, per in slots.items():
         if int(key) + SLOT > since:
             for name, cost in per.items():
                 totals[name] = totals.get(name, 0) + cost
+    return totals
+
+
+def ranked(totals: dict[str, float], field: str, **extra) -> list[dict]:
     return [
-        {"name": n, "cost": round(c, 4)}
+        {field: n, "cost": round(c, 4), **extra}
         for n, c in sorted(totals.items(), key=lambda kv: -kv[1])
         if c > 0
     ]
+
+
+def projects_since(slots: dict, since: float) -> list[dict]:
+    return ranked(totals_since(slots, since), "name")
+
+
+def remote_share(cost: dict, start: float, now: float) -> float:
+    """Host spend inside the window, assuming each day's cost is spread evenly over its elapsed hours."""
+    total = 0.0
+    for day, amount in (cost.get("days") or {}).items():
+        try:
+            midnight = datetime.fromisoformat(day).timestamp()
+        except ValueError:
+            continue
+        end = min(midnight + 86400, now)
+        overlap = min(end, now) - max(midnight, start)
+        if overlap > 0:
+            total += amount * overlap / max(end - midnight, 3600)
+    return total
+
+
+def remote_window(start: float, now: float) -> tuple[list[dict], list[dict]]:
+    projects: list[dict] = []
+    models: list[dict] = []
+    hosts = (load(FLEET, {}).get("hosts") or {}).items()
+    for host, stats in hosts:
+        cost = (stats or {}).get("cost") or {}
+        stale = bool(stats.get("stale")) or now - stats.get("at", 0) > FLEET_STALE
+        spent = remote_share(cost, start, now)
+        for rows, field, out in (
+            (cost.get("projects") or [], "name", projects),
+            (cost.get("models") or [], "model", models),
+        ):
+            basis = sum(r["cost"] for r in rows)
+            if spent <= 0 or basis <= 0:
+                continue
+            out.extend(
+                {
+                    field: r[field],
+                    "cost": round(spent * r["cost"] / basis, 4),
+                    "host": host,
+                    "stale": stale,
+                }
+                for r in rows
+                if r["cost"] > 0
+            )
+    return projects, models
+
+
+def window_start(key: str, span: int, now: float) -> float | None:
+    window = (load(LIMITS, {}).get("rate_limits") or {}).get(key) or {}
+    resets_at = window.get("resets_at") or 0
+    return resets_at - span if resets_at > now else None
+
+
+def window_breakdown(state: dict, start: float | None, now: float) -> dict | None:
+    if start is None:
+        return None
+    local_projects = ranked(totals_since(state["slots"], start), "name")
+    local_models = ranked(totals_since(state["model_slots"], start), "model")
+    remote_projects, remote_models = remote_window(start, now)
+    return {
+        "start": start,
+        "projects": sorted(local_projects + remote_projects, key=lambda r: -r["cost"]),
+        "models": sorted(local_models + remote_models, key=lambda r: -r["cost"]),
+    }
 
 
 def week_start(now: float) -> float:
@@ -206,13 +285,21 @@ def summary(state: dict) -> dict:
             "half_hour": projects_since(state["slots"], now - HALF_HOUR),
             "week": projects_since(state["slots"], week_start(now)),
         },
+        "window": {
+            "five_hour": window_breakdown(
+                state, window_start("five_hour", SESSION, now), now
+            ),
+            "seven_day": window_breakdown(
+                state, window_start("seven_day", WEEK, now), now
+            ),
+        },
         "updated": now,
     }
 
 
 def main() -> None:
     state = load(STATE, {})
-    if "slots" not in state:
+    if "slots" not in state or "model_slots" not in state:
         state = {}
     scan(state, prices())
     save(STATE, state)

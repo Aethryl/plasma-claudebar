@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Cache agents and 7-day stats of remote Orca hosts for claudebar.py to read.
 
-`remote.py live` lists agents per Orca environment (one `worktree ps` per host).
+`remote.py live` lists agents per Orca environment (one `worktree ps` per host) and reads the
+host's probe terminal, which runs probe.py there and reports subagents from the transcripts.
+`remote.py stop` closes the probe terminals.
 `remote.py fleet` runs orca-fleet-stats per environment, at most once per FLEET_EVERY.
 """
 
+import base64
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -14,6 +18,7 @@ import signal
 import subprocess
 import sys
 import time
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 
@@ -23,6 +28,15 @@ HOSTS = os.path.join(CACHE_DIR, "orca-hosts.json")
 TITLES = os.path.join(CACHE_DIR, "remote-titles.json")
 FLEET = os.path.join(CACHE_DIR, "fleet.json")
 FLEET_LOCK = os.path.join(CACHE_DIR, "fleet.lock")
+LIVE_LOCK = os.path.join(CACHE_DIR, "live.lock")
+PROBES = os.path.join(CACHE_DIR, "probes.json")
+PROBE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "probe.py")
+PROBE_TITLE = "claudebar-probe"
+PROBE_LINE = "CLAUDEBAR "
+PROBE_FEED = 60
+PROBE_SILENT = 90
+PROBE_TRUST = 90
+CREATE_TIMEOUT = 10
 SHIM_DIR = os.path.expanduser("~/.config/orca/linux-orca-cli-shim")
 FLEET_STATS = os.path.expanduser(
     "~/Repos/orca-fleet-stats/plugins/orca-fleet-stats/bin/orca-fleet-stats"
@@ -137,17 +151,25 @@ def subagent(sub, now):
     }
 
 
-def projects(host, worktrees, names, now):
+def projects(host, worktrees, names, probed, now):
     found = []
     for tree in worktrees:
         for agent in tree.get("agents") or []:
-            subs = [
-                s for s in (subagent(s, now) for s in agent.get("subagents") or []) if s
-            ][:MAX_SUBAGENTS]
-            status = STATE.get(agent.get("state"), "idle")
-            if status == "idle" and any(s["status"] == "working" for s in subs):
-                status = "delegating"
             pane = agent.get("paneKey") or ""
+            seen = probed.get(pane)
+            if seen is not None:
+                subs = (seen.get("subagents") or [])[:MAX_SUBAGENTS]
+            else:
+                subs = [
+                    s
+                    for s in (subagent(s, now) for s in agent.get("subagents") or [])
+                    if s
+                ][:MAX_SUBAGENTS]
+            status = STATE.get(agent.get("state"), "idle")
+            if status == "idle" and any(
+                s["status"] in ("working", "waiting") for s in subs
+            ):
+                status = "delegating"
             found.append(
                 {
                     "name": tree.get("repo")
@@ -155,6 +177,7 @@ def projects(host, worktrees, names, now):
                     "session": names.get(pane)
                     or agent.get("taskTitle")
                     or agent.get("displayName")
+                    or (seen or {}).get("name")
                     or tree.get("displayName")
                     or "",
                     "status": status,
@@ -168,32 +191,185 @@ def projects(host, worktrees, names, now):
     return found[:MAX_PROJECTS]
 
 
-def poll(host, previous, cache):
+def probe_program():
+    with open(PROBE_SCRIPT, "rb") as f:
+        source = f.read()
+    version = hashlib.sha1(source).hexdigest()[:12]
+    blob = base64.b64encode(zlib.compress(source, 9)).decode()
+    run = f"import base64,zlib;exec(zlib.decompress(base64.b64decode('{blob}')))"
+    return f'exec python3 -I -c "{run}" {version}', version
+
+
+def close_probe(host, handle):
+    try:
+        orca("terminal", "close", "--environment", host, "--terminal", handle)
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        pass
+
+
+def start_probe(host, worktrees, program, now):
+    """Adopt the host's probe terminal by title, closing extras; create one when there is none."""
+    listed = orca("terminal", "list", "--environment", host)["terminals"]
+    mine = [t for t in listed if PROBE_TITLE in (t.get("title") or "")]
+    for extra in mine[1:]:
+        close_probe(host, extra["handle"])
+    if mine:
+        return {"handle": mine[0]["handle"], "started": now, "fed": 0}
+    trees = sorted(
+        (w for w in worktrees if w.get("worktreeId") and not w.get("isArchived")),
+        key=lambda w: not w.get("isMainWorktree"),
+    )
+    if not trees:
+        raise ValueError("no worktree to open the probe in")
+    made = orca(
+        "terminal",
+        "create",
+        "--environment",
+        host,
+        "--worktree",
+        f"id:{trees[0]['worktreeId']}",
+        "--title",
+        PROBE_TITLE,
+        "--command",
+        program,
+        timeout=CREATE_TIMEOUT,
+    )
+    return {"handle": made["terminal"]["handle"], "started": now, "fed": now}
+
+
+def read_probe(host, entry):
+    """New probe output since the stored cursor; only the tail when it is behind or new."""
+    base = ("terminal", "read", "--environment", host, "--terminal", entry["handle"])
+    term = None
+    if entry.get("cursor") is not None:
+        term = orca(*base, "--cursor", str(entry["cursor"]), "--limit", "60")[
+            "terminal"
+        ]
+        cursor = term.get("nextCursor")
+    if term is None or term.get("limited"):
+        term = orca(*base, "--limit", "4")["terminal"]
+        cursor = term.get("latestCursor") or term.get("nextCursor")
+    if term.get("status") == "exited":
+        close_probe(host, entry["handle"])
+        raise ValueError("probe exited")
+    entry["cursor"] = cursor
+    for line in reversed(term.get("tail") or []):
+        line = line.strip()
+        if line.startswith(PROBE_LINE):
+            try:
+                data = json.loads(line[len(PROBE_LINE) :])
+            except ValueError:
+                continue
+            if isinstance(data, dict):
+                return data
+    return None
+
+
+def probe(host, worktrees, entry, program, version, now):
+    """Keep one probe terminal on the host alive and return its latest snapshot by pane."""
+    entry = dict(entry)
+    try:
+        if not entry.get("handle"):
+            entry.update(start_probe(host, worktrees, program, now), cursor=None)
+        data = read_probe(host, entry)
+        if data is not None and data.get("v") != version:
+            close_probe(host, entry["handle"])
+            entry.pop("handle")
+        elif data is not None:
+            entry.update(snapshot=data.get("sessions") or [], seen=now)
+        elif now - max(entry.get("seen", 0), entry.get("started", 0)) > PROBE_SILENT:
+            close_probe(host, entry["handle"])
+            entry.pop("handle")
+        if entry.get("handle") and now - entry.get("fed", 0) > PROBE_FEED:
+            orca(
+                "terminal",
+                "send",
+                "--environment",
+                host,
+                "--terminal",
+                entry["handle"],
+                "--text",
+                ".",
+                "--enter",
+            )
+            entry["fed"] = now
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        entry.pop("handle", None)
+    return entry
+
+
+def probed(entry, now):
+    if now - entry.get("seen", 0) > PROBE_TRUST:
+        return {}
+    return {s.get("pane"): s for s in entry.get("snapshot") or [] if s.get("pane")}
+
+
+def poll(host, previous, cache, entry, program, version):
     now = time.time()
     try:
         worktrees = orca("worktree", "ps", "--environment", host)["worktrees"]
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
-        return {**previous, "ok": False, "failed_at": now}
+        return {**previous, "ok": False, "failed_at": now}, entry
+    entry = probe(host, worktrees, entry, program, version, now)
     panes = {a.get("paneKey") or "" for w in worktrees for a in (w.get("agents") or [])}
     names = titles(host, panes, cache) if panes else {}
     return {
         "ok": True,
         "fetched_at": now,
-        "projects": projects(host, worktrees, names, now),
-    }
+        "probe": bool(probed(entry, now)),
+        "projects": projects(host, worktrees, names, probed(entry, now), now),
+    }, entry
 
 
 def live():
-    hosts = environments()
-    previous = load(LIVE, {}).get("hosts") or {}
-    cache = load(TITLES, {})
-    result = {}
-    if hosts:
-        with ThreadPoolExecutor(max_workers=min(4, len(hosts))) as pool:
-            polled = pool.map(lambda h: poll(h, previous.get(h) or {}, cache), hosts)
-            result = dict(zip(hosts, polled))
-        save(TITLES, {h: cache[h] for h in hosts if h in cache})
-    save(LIVE, {"at": time.time(), "hosts": result})
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    with open(LIVE_LOCK, "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return
+        hosts = environments()
+        previous = load(LIVE, {}).get("hosts") or {}
+        cache = load(TITLES, {})
+        probes = load(PROBES, {})
+        program, version = probe_program()
+        for gone in set(probes) - set(hosts):
+            if probes[gone].get("handle"):
+                close_probe(gone, probes[gone]["handle"])
+            del probes[gone]
+        result = {}
+        if hosts:
+            with ThreadPoolExecutor(max_workers=min(4, len(hosts))) as pool:
+                polled = list(
+                    pool.map(
+                        lambda h: poll(
+                            h,
+                            previous.get(h) or {},
+                            cache,
+                            probes.get(h) or {},
+                            program,
+                            version,
+                        ),
+                        hosts,
+                    )
+                )
+            result = {h: p[0] for h, p in zip(hosts, polled)}
+            probes.update({h: p[1] for h, p in zip(hosts, polled)})
+            save(TITLES, {h: cache[h] for h in hosts if h in cache})
+        save(PROBES, probes)
+        save(LIVE, {"at": time.time(), "hosts": result})
+
+
+def stop():
+    """Close every probe terminal; the widget calls this when it unloads."""
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    with open(LIVE_LOCK, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        probes = load(PROBES, {})
+        for host, entry in probes.items():
+            if entry.get("handle"):
+                close_probe(host, entry["handle"])
+        save(PROBES, {})
 
 
 def report(host, since):
@@ -305,4 +481,6 @@ def fleet():
 
 
 if __name__ == "__main__":
-    {"live": live, "fleet": fleet}[sys.argv[1] if len(sys.argv) > 1 else "live"]()
+    {"live": live, "stop": stop, "fleet": fleet}[
+        sys.argv[1] if len(sys.argv) > 1 else "live"
+    ]()
