@@ -405,13 +405,28 @@ def usd_by(rows, field, limit):
     ][:limit]
 
 
-def summary(data, history):
+TOKEN_KEYS = ("input", "output", "cache_write", "cache_read")
+
+
+def token_row(row):
+    return [row.get(k) or 0 for k in TOKEN_KEYS]
+
+
+def summary(data, history, token_history):
     total = data.get("total") or {}
     cost = data.get("cost") or {}
     week = {r["key"]: r.get("usd") or 0 for r in cost.get("per_day") or []}
     first = (date.today() - timedelta(days=WEEK_DAYS - 1)).isoformat()
     days = {d: v for d, v in history.items() if d < first}
     days.update({d: v for d, v in week.items() if d >= first})
+    token_days = {d: v for d, v in token_history.items() if d < first}
+    token_days.update(
+        {
+            r["key"]: token_row(r)
+            for r in cost.get("per_day") or []
+            if r.get("key") and r["key"] >= first
+        }
+    )
     return {
         "sessions": data.get("sessions") or 0,
         "calls": total.get("n") or 0,
@@ -428,6 +443,7 @@ def summary(data, history):
         ][:MAX_FLEET_PROJECTS],
         "cost": {
             "days": {d: round(v, 4) for d, v in sorted(days.items())[-MONTH_DAYS:]},
+            "token_days": dict(sorted(token_days.items())[-MONTH_DAYS:]),
             "models": usd_by(cost.get("model"), "model", MAX_COST_ROWS),
             "projects": usd_by(cost.get("project"), "name", MAX_COST_ROWS),
             "unpriced": (cost.get("unpriced_models") or [])[:MAX_COST_ROWS],
@@ -436,15 +452,23 @@ def summary(data, history):
 
 
 def month_history(host, previous):
-    """Per-day cost before this week; those days no longer change, so 30d runs once a day."""
+    """Per-day cost and tokens before this week; those days no longer change, so 30d runs once a day."""
     today = date.today().isoformat()
-    if previous.get("history_on") == today:
-        return previous.get("history") or {}, today
+    if previous.get("history_on") == today and "token_history" in previous:
+        return previous.get("history") or {}, previous["token_history"], today
     data = report(host, f"{MONTH_DAYS}d")
     if data is None:
-        return previous.get("history") or {}, previous.get("history_on")
-    rows = (data.get("cost") or {}).get("per_day") or []
-    return {r["key"]: r.get("usd") or 0 for r in rows if r.get("key")}, today
+        return (
+            previous.get("history") or {},
+            previous.get("token_history") or {},
+            previous.get("history_on"),
+        )
+    rows = [r for r in (data.get("cost") or {}).get("per_day") or [] if r.get("key")]
+    return (
+        {r["key"]: r.get("usd") or 0 for r in rows},
+        {r["key"]: token_row(r) for r in rows},
+        today,
+    )
 
 
 def fleet():
@@ -469,10 +493,11 @@ def fleet():
                 if before:
                     found[host] = {**before, "stale": True}
                 continue
-            history, history_on = month_history(host, before)
+            history, token_history, history_on = month_history(host, before)
             found[host] = {
-                **summary(data, history),
+                **summary(data, history, token_history),
                 "history": history,
+                "token_history": token_history,
                 "history_on": history_on,
                 "stale": False,
                 "at": time.time(),

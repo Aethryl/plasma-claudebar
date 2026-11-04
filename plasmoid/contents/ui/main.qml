@@ -309,6 +309,24 @@ PlasmoidItem {
         return value >= 1000 ? (value / 1000).toFixed(1) + "k" : String(value || 0)
     }
 
+    function tokens(n) {
+        if (n === undefined || n === null)
+            return "–"
+        if (n >= 1e9)
+            return (n / 1e9).toFixed(n >= 1e11 ? 0 : 1) + "B"
+        if (n >= 1e6)
+            return (n / 1e6).toFixed(n >= 1e8 ? 0 : 1) + "M"
+        if (n >= 1e3)
+            return (n / 1e3).toFixed(n >= 1e5 ? 0 : 1) + "K"
+        return String(n)
+    }
+
+    function totalTokens(key) {
+        if (!costs || !costs.tokens)
+            return null
+        return remoteCosts.reduce((sum, h) => sum + (h.tokens ? h.tokens[key] : 0), costs.tokens[key])
+    }
+
     function totalCost(key) {
         const local = costs ? costs[key] : null
         if (local === undefined || local === null)
@@ -1354,6 +1372,82 @@ PlasmoidItem {
                     font.pointSize: Kirigami.Theme.smallFont.pointSize
                 }
             }
+        }
+    }
+
+    component Tokens: ColumnLayout {
+        spacing: Kirigami.Units.smallSpacing
+        readonly property var kinds: {
+            const sum = { "in": 0, "out": 0, "cache_w": 0, "cache_r": 0 }
+            for (const k in sum)
+                sum[k] = root.remoteCosts.reduce((acc, h) => acc + (h.tokens ? h.tokens.kinds[k] : 0), root.costs && root.costs.tokens ? root.costs.tokens.kinds[k] : 0)
+            return sum
+        }
+        readonly property int hit: {
+            const all = kinds.cache_r + kinds.cache_w + kinds["in"]
+            return all > 0 ? Math.round(100 * kinds.cache_r / all) : 0
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: Kirigami.Units.smallSpacing
+            PlasmaComponents.Label {
+                text: "Tokens"
+                font.weight: Font.DemiBold
+            }
+            PlasmaComponents.Label {
+                Layout.fillWidth: true
+                text: "fresh"
+                color: root.dim
+                font.pointSize: Kirigami.Theme.smallFont.pointSize
+                elide: Text.ElideRight
+            }
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: Kirigami.Units.gridUnit
+
+            Repeater {
+                model: [
+                    { label: "Today", value: root.totalTokens("today") },
+                    { label: "7 days", value: root.totalTokens("week") },
+                    { label: "30 days", value: root.totalTokens("month") }
+                ]
+                ColumnLayout {
+                    spacing: 0
+                    PlasmaComponents.Label {
+                        text: root.tokens(modelData.value)
+                        font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.2
+                        font.weight: Font.DemiBold
+                    }
+                    PlasmaComponents.Label {
+                        text: modelData.label
+                        color: root.dim
+                        font.pointSize: Kirigami.Theme.smallFont.pointSize
+                    }
+                }
+            }
+
+            Item { Layout.fillWidth: true }
+        }
+
+        PlasmaComponents.Label {
+            Layout.fillWidth: true
+            text: "30d: out " + root.tokens(kinds.out) + " · in " + root.tokens(kinds["in"]) + " · cache w " + root.tokens(kinds.cache_w)
+            color: root.dim
+            opacity: root.remoteStale ? 0.6 : 1
+            font.pointSize: Kirigami.Theme.smallFont.pointSize
+            elide: Text.ElideRight
+        }
+
+        PlasmaComponents.Label {
+            Layout.fillWidth: true
+            text: "+ " + root.tokens(kinds.cache_r) + " cache reads (" + hit + "% hit)"
+            color: root.dim
+            opacity: root.remoteStale ? 0.6 : 1
+            font.pointSize: Kirigami.Theme.smallFont.pointSize
+            elide: Text.ElideRight
         }
     }
 
@@ -2617,6 +2711,11 @@ PlasmoidItem {
 
                             Costs {
                                 visible: !!root.costs
+                                Layout.fillWidth: true
+                            }
+
+                            Tokens {
+                                visible: !!root.costs && !!root.costs.tokens
                                 Layout.fillWidth: true
                             }
 

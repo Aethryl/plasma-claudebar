@@ -25,6 +25,13 @@ WEEK = 7 * 86400
 SESSION = 5 * 3600
 FLEET_STALE = 45 * 60
 WEB_SEARCH_COST = 0.01
+TOKEN_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+)
+TOKEN_KINDS = ("in", "out", "cache_w", "cache_r")
 
 
 def load(path: Path, default):
@@ -102,8 +109,60 @@ def project_of(cwd: str) -> str:
     return parts[-1] or "~"
 
 
-def scan(state: dict, table: dict) -> None:
+def parse(line: bytes) -> tuple[dict, dict, str, datetime, str] | None:
+    if b'"usage"' not in line:
+        return None
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        return None
+    message = entry.get("message") or {}
+    usage = message.get("usage")
+    model = message.get("model")
+    moment = moment_of(entry.get("timestamp"))
+    if not usage or not model or not moment or model.startswith("<"):
+        return None
+    return entry, usage, model, moment, f"{message.get('id')}:{entry.get('requestId')}"
+
+
+def add_tokens(token_days: dict, day: str, usage: dict) -> None:
+    row = token_days.setdefault(day, [0] * len(TOKEN_FIELDS))
+    for i, field in enumerate(TOKEN_FIELDS):
+        row[i] += usage.get(field) or 0
+
+
+def backfill_tokens(state: dict) -> None:
+    """One-time token pass over the transcripts still on disk; never touches cost days, offsets or seen."""
     cutoff = time.time() - KEEP_DAYS * 86400
+    oldest = (date.today() - timedelta(days=KEEP_DAYS)).isoformat()
+    token_days: dict = {}
+    counted: set[str] = set()
+    for path in PROJECTS.glob("**/*.jsonl"):
+        try:
+            if path.stat().st_mtime < cutoff:
+                continue
+            data = path.read_bytes()
+        except OSError:
+            continue
+        for line in data[: data.rfind(b"\n") + 1].splitlines():
+            parsed = parse(line)
+            if parsed is None:
+                continue
+            _, usage, _, moment, ident = parsed
+            day = moment.date().isoformat()
+            if ident in counted or day < oldest:
+                continue
+            counted.add(ident)
+            add_tokens(token_days, day, usage)
+    state["token_days"] = token_days
+
+
+def scan(state: dict, table: dict) -> None:
+    fresh_tokens = "token_days" not in state
+    if fresh_tokens:
+        backfill_tokens(state)
+    cutoff = time.time() - KEEP_DAYS * 86400
+    token_days = state["token_days"]
     files = state.setdefault("files", {})
     seen = state.setdefault("seen", {})
     days = state.setdefault("days", {})
@@ -128,23 +187,16 @@ def scan(state: dict, table: dict) -> None:
             chunk = handle.read()
         end = chunk.rfind(b"\n") + 1
         for line in chunk[:end].splitlines():
-            if b'"usage"' not in line:
+            parsed = parse(line)
+            if parsed is None:
                 continue
-            try:
-                entry = json.loads(line)
-            except ValueError:
-                continue
-            message = entry.get("message") or {}
-            usage = message.get("usage")
-            model = message.get("model")
-            moment = moment_of(entry.get("timestamp"))
-            if not usage or not model or not moment or model.startswith("<"):
-                continue
-            ident = f"{message.get('id')}:{entry.get('requestId')}"
+            entry, usage, model, moment, ident = parsed
             if ident in seen:
                 continue
             day = moment.date().isoformat()
             seen[ident] = day
+            if not fresh_tokens:
+                add_tokens(token_days, day, usage)
             price = price_for(model, table)
             if price is None:
                 continue
@@ -161,6 +213,7 @@ def scan(state: dict, table: dict) -> None:
         files[key] = offset + end
     oldest = (date.today() - timedelta(days=KEEP_DAYS)).isoformat()
     state["days"] = {d: v for d, v in days.items() if d >= oldest}
+    state["token_days"] = {d: v for d, v in token_days.items() if d >= oldest}
     state["seen"] = {k: d for k, d in seen.items() if d >= oldest}
     state["files"] = {k: v for k, v in files.items() if Path(k).exists()}
     state["slots"] = {k: v for k, v in slots.items() if int(k) >= slot_cutoff}
@@ -258,6 +311,21 @@ def week_start(now: float) -> float:
     return resets_at - WEEK if resets_at > now else now - WEEK
 
 
+def token_summary(token_days: dict, today: date) -> dict:
+    def window(n: int) -> list[int]:
+        rows = [
+            token_days.get((today - timedelta(days=i)).isoformat()) for i in range(n)
+        ]
+        return [sum(r[k] for r in rows if r) for k in range(len(TOKEN_FIELDS))]
+
+    return {
+        "today": sum(window(1)[:3]),
+        "week": sum(window(7)[:3]),
+        "month": sum(window(30)[:3]),
+        "kinds": dict(zip(TOKEN_KINDS, window(30))),
+    }
+
+
 def summary(state: dict) -> dict:
     today = date.today()
     days = state["days"]
@@ -293,6 +361,7 @@ def summary(state: dict) -> dict:
                 state, window_start("seven_day", WEEK, now), now
             ),
         },
+        "tokens": token_summary(state["token_days"], today),
         "updated": now,
     }
 

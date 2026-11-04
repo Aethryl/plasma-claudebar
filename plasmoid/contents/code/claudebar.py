@@ -398,10 +398,24 @@ def remote_cost(cost):
         first = (today - timedelta(days=n - 1)).isoformat()
         return round(sum(v for d, v in days.items() if d >= first), 2)
 
+    token_days = cost.get("token_days") or {}
+
+    def token_window(n):
+        first = (today - timedelta(days=n - 1)).isoformat()
+        rows = [v for d, v in token_days.items() if d >= first]
+        return [sum(r[k] for r in rows) for k in range(4)]
+
+    month_tokens = token_window(30)
     return {
         "today": since(1),
         "week": since(7),
         "month": since(30),
+        "tokens": {
+            "today": sum(token_window(1)[:3]),
+            "week": sum(token_window(7)[:3]),
+            "month": sum(month_tokens[:3]),
+            "kinds": dict(zip(("in", "out", "cache_w", "cache_r"), month_tokens)),
+        },
         "daily": [
             {"day": d, "cost": round(days.get(d, 0), 2)}
             for d in ((today - timedelta(days=n)).isoformat() for n in range(6, -1, -1))
@@ -418,7 +432,11 @@ def remote_stats(now):
         return []
     found = []
     for name, stats in sorted((cache.get("hosts") or {}).items()):
-        stats = {k: v for k, v in stats.items() if k not in ("history", "cost")}
+        stats = {
+            k: v
+            for k, v in stats.items()
+            if k not in ("history", "token_history", "cost")
+        }
         cost = (cache["hosts"][name] or {}).get("cost") or {}
         stale = stats.get("stale") or now - stats.get("at", 0) > REMOTE_FLEET_STALE
         found.append(
