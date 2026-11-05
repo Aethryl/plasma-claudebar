@@ -340,7 +340,29 @@ PlasmoidItem {
     }
 
     function modelName(model) {
-        return model.replace(/^claude-/, "").replace(/-\d{8}$/, "").replace(/-(\d+)-(\d+)$/, " $1.$2").replace(/-(\d+)$/, " $1")
+        const id = String(model || "").toLowerCase().replace(/^claude-/, "")
+        const parts = id.split("-").filter(p => !/^\d{8}$/.test(p))
+        const name = parts.find(p => /^[a-z]+$/.test(p))
+        if (!name)
+            return id
+        const nums = parts.filter(p => /^\d+$/.test(p))
+        return nums.length ? name + " " + nums.join(".") : name
+    }
+
+    readonly property var modelPalette: [
+        active,
+        warning,
+        ok,
+        critical,
+        Kirigami.Theme.highlightColor,
+        Qt.tint(Kirigami.Theme.positiveTextColor, Qt.alpha(Kirigami.Theme.activeTextColor, 0.5))
+    ]
+
+    function modelColor(name) {
+        let h = 0
+        for (const c of String(name))
+            h = (h * 31 + c.charCodeAt(0)) >>> 0
+        return modelPalette[h % modelPalette.length]
     }
 
     Component {
@@ -1800,13 +1822,10 @@ PlasmoidItem {
                 return []
             const grouped = {}
             list.forEach(m => {
-                const family = (/opus|sonnet|haiku/.exec(m.model) || [m.model.replace(/^claude-/, "")])[0]
+                const family = root.modelName(m.model)
                 grouped[family] = (grouped[family] || 0) + m.cost / total * pct
             })
-            return Object.keys(grouped).map(n => ({ name: n, value: grouped[n] })).filter(m => m.value >= 0.5).sort((x, y) => y.value - x.value)
-        }
-        function modelColor(name) {
-            return name === "opus" ? root.active : name === "sonnet" ? root.warning : name === "haiku" ? root.ok : root.dim
+            return Object.keys(grouped).map(n => ({ name: n, value: grouped[n] })).filter(m => m.value >= 0.1).sort((x, y) => y.value - x.value)
         }
         Layout.fillWidth: true
         spacing: 0
@@ -1956,7 +1975,7 @@ PlasmoidItem {
                             Layout.preferredWidth: Math.max(1, modelData.value)
                             implicitHeight: Kirigami.Units.smallSpacing * 1.25
                             radius: height / 2
-                            color: lim.modelColor(modelData.name)
+                            color: root.modelColor(modelData.name)
                         }
                     }
                 }
@@ -1969,7 +1988,7 @@ PlasmoidItem {
                         delegate: PlasmaComponents.Label {
                             required property var modelData
                             required property int index
-                            text: "<font color='" + lim.modelColor(modelData.name) + "'>●</font> " + modelData.name + " " + Math.round(modelData.value)
+                            text: "<font color='" + root.modelColor(modelData.name) + "'>●</font> " + modelData.name + " · " + (modelData.value < 1 ? modelData.value.toFixed(1) : Math.round(modelData.value)) + "%"
                             textFormat: Text.StyledText
                             color: root.dim
                             font.pointSize: Kirigami.Theme.smallFont.pointSize

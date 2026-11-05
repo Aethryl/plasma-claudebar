@@ -29,7 +29,6 @@ MAX_SUBAGENTS = 8
 MAX_LINE = 12000
 TAIL = 32768
 ORDER = ["waiting", "error", "working", "done"]
-FAMILIES = ("opus", "sonnet", "haiku", "fable")
 CLK = os.sysconf("SC_CLK_TCK")
 cache: dict = {}
 
@@ -112,8 +111,13 @@ def session_of(pid, cwd, args, since, claimed):
 
 
 def family(model):
-    model = str(model or "").lower()
-    return next((f for f in FAMILIES if f in model), model or None)
+    model = str(model or "").lower().removeprefix("claude-")
+    parts = [p for p in model.split("-") if not (p.isdigit() and len(p) == 8)]
+    name = next((p for p in parts if p.isascii() and p.isalpha()), None)
+    if not name:
+        return model or None
+    nums = [p for p in parts if p.isascii() and p.isdigit()]
+    return f"{name} {'.'.join(nums)}" if nums else name
 
 
 def first_stamp(path):
