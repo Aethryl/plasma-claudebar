@@ -344,7 +344,9 @@ def summary(state: dict) -> dict:
         "today": round(total(today), 2),
         "week": round(sum(total(d) for d in week), 2),
         "month": round(sum(total(d) for d in month), 2),
-        "daily": [{"day": d.isoformat(), "cost": round(total(d), 2)} for d in week],
+        "daily": [
+            {"day": d.isoformat(), "cost": round(total(d), 2)} for d in reversed(month)
+        ],
         "models": [
             {"model": m, "cost": round(c, 2)}
             for m, c in sorted(models.items(), key=lambda kv: -kv[1])

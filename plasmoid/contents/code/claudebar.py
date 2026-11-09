@@ -16,7 +16,13 @@ LIMITS_CACHE = os.path.expanduser("~/.cache/claude-bar/limits.json")
 STALE_AFTER = 15 * 60
 PACE = {
     "five_hour": ("~/.cache/claude-bar/pace.json", 5 * 3600, 30 * 60, 5 * 60, 3600),
-    "seven_day": ("~/.cache/claude-bar/pace-7d.json", 7 * 86400, 86400, 3600, 86400),
+    "seven_day": (
+        "~/.cache/claude-bar/pace-7d.json",
+        7 * 86400,
+        7 * 86400,
+        3600,
+        86400,
+    ),
 }
 BURN_SPAN = {"five_hour": 30 * 60, "seven_day": 7 * 86400}
 HERDR = os.path.expanduser("~/.local/bin/herdr")
@@ -418,7 +424,9 @@ def remote_cost(cost):
         },
         "daily": [
             {"day": d, "cost": round(days.get(d, 0), 2)}
-            for d in ((today - timedelta(days=n)).isoformat() for n in range(6, -1, -1))
+            for d in (
+                (today - timedelta(days=n)).isoformat() for n in range(29, -1, -1)
+            )
         ],
         "models": cost.get("models") or [],
         "projects": cost.get("projects") or [],

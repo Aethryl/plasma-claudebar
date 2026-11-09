@@ -30,8 +30,6 @@ PlasmoidItem {
     property Item compactItem: null
     property bool drooped: false
     property bool showIdle: false
-    property var openLimits: ({ five_hour: false, seven_day: false })
-    readonly property bool bothOpen: openLimits.five_hour && openLimits.seven_day
 
     readonly property real ear: Kirigami.Units.gridUnit * 0.7
     readonly property real bottomRadius: Kirigami.Units.gridUnit * 1.1
@@ -122,12 +120,6 @@ PlasmoidItem {
         return level === "crit" ? critical : level === "warn" ? ctxWarn : fallback
     }
 
-    function setLimitOpen(key, open) {
-        const next = Object.assign({}, openLimits)
-        next[key] = open
-        openLimits = next
-    }
-
     function saveSetting(key, value) {
         const next = Object.assign({}, pendingSettings)
         next[key] = value
@@ -196,10 +188,6 @@ PlasmoidItem {
 
     function etaReady(key, win) {
         return !!win && win.start !== undefined && now - win.start >= (key === "seven_day" ? 6 * 3600 : 600)
-    }
-
-    function atRisk(key, win) {
-        return !!win && (win.pct >= 100 || (etaReady(key, win) && win.hits_in !== undefined && win.hits_in !== null))
     }
 
     function span(key, seconds) {
@@ -1284,6 +1272,104 @@ PlasmoidItem {
         Stack { cells: root.bucket(tier.cells, ["done", "idle"]); tint: root.dim; columns: tier.columns; rows: tier.rows; share: tier.share }
     }
 
+    component DayChart: RowLayout {
+        id: chart
+        property var days: []
+        property real peak: 1
+        property int levels: 12
+        property string valueKey: "cost"
+        property string labelMode: "letters"
+        property real colGap: Kirigami.Units.smallSpacing
+        property bool mondayGap: false
+        property var format: v => Math.round(v)
+        readonly property real dpr: Screen.devicePixelRatio || 1
+        readonly property real cell: Math.max(2, Math.round(Kirigami.Units.gridUnit * 0.22 * dpr)) / dpr
+        readonly property real gap: Math.max(1, Math.round(dpr)) / dpr
+        readonly property real plotHeight: levels * cell + (levels - 1) * gap
+        spacing: Kirigami.Units.largeSpacing
+
+        Item {
+            Layout.alignment: Qt.AlignTop
+            Layout.preferredWidth: axisTop.implicitWidth
+            Layout.preferredHeight: chart.plotHeight
+            PlasmaComponents.Label {
+                id: axisTop
+                anchors.top: parent.top
+                anchors.right: parent.right
+                text: chart.format(chart.peak)
+                color: root.dim
+                font.pointSize: Kirigami.Theme.smallFont.pointSize * 0.85
+            }
+            PlasmaComponents.Label {
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.right: parent.right
+                text: chart.format(chart.peak / 2)
+                color: root.dim
+                font.pointSize: Kirigami.Theme.smallFont.pointSize * 0.85
+            }
+            PlasmaComponents.Label {
+                anchors.bottom: parent.bottom
+                anchors.right: parent.right
+                text: "0"
+                color: root.dim
+                font.pointSize: Kirigami.Theme.smallFont.pointSize * 0.85
+            }
+        }
+
+        Item {
+            id: plot
+            Layout.fillWidth: true
+            Layout.alignment: Qt.AlignTop
+            Layout.preferredHeight: plotRow.implicitHeight
+            readonly property int count: chart.days.length
+            readonly property int bigGaps: chart.mondayGap ? chart.days.filter((d, i) => i > 0 && new Date(d.day + "T12:00:00").getDay() === 1).length : 0
+            readonly property real extra: chart.colGap * 2
+            readonly property real colW: count > 0 ? Math.max(1, Math.floor((width - (count - 1) * chart.colGap - bigGaps * extra) * chart.dpr / count)) / chart.dpr : 0
+            Row {
+                id: plotRow
+                spacing: chart.colGap
+                Repeater {
+                    model: chart.days
+                    Item {
+                        id: col
+                        readonly property var date: new Date(modelData.day + "T12:00:00")
+                        readonly property real value: modelData[chart.valueKey] || 0
+                        readonly property int lit: value > 0 ? Math.max(1, Math.round(value / chart.peak * chart.levels)) : 0
+                        readonly property bool isToday: index === chart.days.length - 1
+                        readonly property bool monday: date.getDay() === 1
+                        readonly property real lead: chart.mondayGap && monday && index > 0 ? plot.extra : 0
+                        width: plot.colW + lead
+                        implicitHeight: chart.plotHeight + chart.gap + dayLabel.implicitHeight
+                        height: implicitHeight
+                        Column {
+                            x: col.lead
+                            spacing: chart.gap
+                            Repeater {
+                                model: chart.levels
+                                Rectangle {
+                                    width: plot.colW
+                                    height: chart.cell
+                                    color: chart.levels - index <= col.lit
+                                        ? (col.isToday ? Kirigami.Theme.highlightColor : Qt.alpha(Kirigami.Theme.textColor, 0.55))
+                                        : Qt.alpha(Kirigami.Theme.textColor, 0.08)
+                                }
+                            }
+                        }
+                        PlasmaComponents.Label {
+                            id: dayLabel
+                            x: col.lead + (chart.labelMode === "letters" ? (plot.colW - implicitWidth) / 2 : (col.isToday ? plot.colW - implicitWidth : 0))
+                            y: chart.plotHeight + chart.gap
+                            visible: chart.labelMode === "letters" || col.monday || col.isToday
+                            text: chart.labelMode === "letters" ? col.date.toLocaleString(Qt.locale(), "ddd").slice(0, 1) : col.date.toLocaleString(Qt.locale(), "d MMM")
+                            color: col.isToday ? Kirigami.Theme.highlightColor : root.dim
+                            font.pointSize: Kirigami.Theme.smallFont.pointSize * 0.85
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     component Costs: ColumnLayout {
         spacing: Kirigami.Units.smallSpacing
         readonly property var daily: root.costs ? root.costs.daily.map(d => ({ day: d.day, cost: root.remoteCosts.reduce((sum, h) => sum + ((h.daily || []).find(r => r.day === d.day) || { cost: 0 }).cost, d.cost) })) : []
@@ -1293,7 +1379,7 @@ PlasmoidItem {
                 merged[m.model] = (merged[m.model] || 0) + m.cost
             return Object.keys(merged).map(k => ({ model: k, cost: merged[k] })).sort((a, b) => b.cost - a.cost)
         }
-        readonly property real peak: Math.max(1, ...daily.map(d => d.cost))
+        readonly property real costPeak: Math.max(1, ...daily.map(d => d.cost))
 
         RowLayout {
             Layout.fillWidth: true
@@ -1336,46 +1422,43 @@ PlasmoidItem {
                 }
             }
 
-            Item { Layout.fillWidth: true }
+        }
 
-            Row {
-                id: week
-                readonly property real dpr: Screen.devicePixelRatio || 1
-                readonly property real cell: Math.max(2, Math.round(Kirigami.Units.gridUnit * 0.2 * dpr)) / dpr
-                readonly property real gap: Math.max(1, Math.round(dpr)) / dpr
-                readonly property int levels: 8
-                Layout.alignment: Qt.AlignBottom
-                spacing: gap * 2
-                Repeater {
-                    model: daily
-                    Column {
-                        readonly property int lit: modelData.cost > 0 ? Math.max(1, Math.round(modelData.cost / peak * week.levels)) : 0
-                        readonly property bool isToday: index === daily.length - 1
-                        spacing: week.gap
-                        Repeater {
-                            model: week.levels
-                            Rectangle {
-                                width: week.cell * 2 + week.gap
-                                height: week.cell
-                                color: week.levels - index <= lit
-                                    ? (isToday ? Kirigami.Theme.highlightColor : Qt.alpha(Kirigami.Theme.textColor, 0.55))
-                                    : Qt.alpha(Kirigami.Theme.textColor, 0.08)
-                            }
-                        }
-                        PlasmaComponents.Label {
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            text: new Date(modelData.day + "T12:00:00").toLocaleString(Qt.locale(), "ddd").slice(0, 1)
-                            color: root.dim
-                            font.pointSize: Kirigami.Theme.smallFont.pointSize * 0.85
-                        }
-                    }
-                }
-            }
+        PlasmaComponents.Label {
+            Layout.topMargin: Kirigami.Units.largeSpacing
+            text: "7 days"
+            color: root.dim
+            font.pointSize: Kirigami.Theme.smallFont.pointSize
+        }
+        DayChart {
+            Layout.fillWidth: true
+            days: daily.slice(-7)
+            peak: costPeak
+            colGap: Kirigami.Units.smallSpacing * 2
+            labelMode: "letters"
+            format: root.money
+        }
+
+        PlasmaComponents.Label {
+            Layout.topMargin: Kirigami.Units.largeSpacing * 2
+            text: "30 days"
+            color: root.dim
+            font.pointSize: Kirigami.Theme.smallFont.pointSize
+        }
+        DayChart {
+            Layout.fillWidth: true
+            days: daily
+            peak: costPeak
+            colGap: Kirigami.Units.smallSpacing / 2
+            mondayGap: true
+            labelMode: "dates"
+            format: root.money
         }
 
         PlasmaComponents.Label {
             visible: root.remoteCosts.length > 0
             Layout.fillWidth: true
+            Layout.topMargin: Kirigami.Units.largeSpacing
             text: "7 days · " + root.hostCosts("week").map(h => h.host + " " + root.money(h.cost) + (h.stale ? " (stale)" : "")).join(" · ")
             color: root.dim
             opacity: root.remoteStale ? 0.6 : 1
@@ -1741,33 +1824,17 @@ PlasmoidItem {
         }
     }
 
-    component Chip: Rectangle {
-        property alias text: chipLabel.text
-        property color tone
-        implicitWidth: chipLabel.implicitWidth + Kirigami.Units.smallSpacing * 2
-        implicitHeight: chipLabel.implicitHeight
-        radius: height / 2
-        color: Qt.alpha(tone, 0.16)
-        PlasmaComponents.Label {
-            id: chipLabel
-            anchors.centerIn: parent
-            color: parent.tone
-            font.pointSize: Kirigami.Theme.smallFont.pointSize
-            font.weight: Font.DemiBold
-        }
-    }
-
     component LimitRow: ColumnLayout {
         id: lim
         property string key
         property string title
         property string sub
+        property bool separated: false
         property string burnTitle
         property string windowTitle: "This window"
         property var win
         property var window: null
         property var spend: []
-        readonly property bool open: !!root.openLimits[key]
         readonly property bool paced: !!win && win.rate !== undefined
         readonly property real pct: win ? win.pct : 0
         readonly property color accent: win ? root.pctColor(pct) : root.dim
@@ -1792,7 +1859,7 @@ PlasmoidItem {
             const total = (spend || []).reduce((sum, p) => sum + p.cost, 0)
             if (!paced || total <= 0 || !(win.burned > 0))
                 return []
-            return spend.map(p => ({ name: p.name, host: p.host || "", stale: !!p.stale, value: p.cost / total * win.burned })).filter(p => p.value >= 0.5).sort((a, b) => b.value - a.value).slice(0, root.bothOpen ? 3 : 5)
+            return spend.map(p => ({ name: p.name, host: p.host || "", stale: !!p.stale, value: p.cost / total * win.burned })).filter(p => p.value >= 0.5).sort((a, b) => b.value - a.value).slice(0, 3)
         }
         readonly property real peak: Math.max(0.01, ...burners.map(b => b.value))
         readonly property var windowRows: {
@@ -1832,191 +1899,139 @@ PlasmoidItem {
         opacity: root.bar && root.bar.stale ? 0.5 : 1
 
         Rectangle {
+            visible: lim.separated
             Layout.fillWidth: true
-            implicitHeight: head.implicitHeight + Kirigami.Units.smallSpacing * 2
-            radius: Kirigami.Units.cornerRadius
-            color: lim.open ? Qt.alpha(Kirigami.Theme.textColor, 0.06) : headHover.containsMouse ? Qt.alpha(Kirigami.Theme.textColor, 0.03) : "transparent"
+            Layout.preferredHeight: 1
+            Layout.topMargin: Kirigami.Units.largeSpacing * 2
+            Layout.bottomMargin: Kirigami.Units.largeSpacing * 2
+            color: root.hairline
+        }
 
-            MouseArea {
-                id: headHover
-                anchors.fill: parent
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.setLimitOpen(lim.key, !lim.open)
+        RowLayout {
+            Layout.fillWidth: true
+            Layout.leftMargin: Kirigami.Units.smallSpacing / 2
+            Layout.rightMargin: Kirigami.Units.smallSpacing / 2
+            spacing: Kirigami.Units.smallSpacing
+            PlasmaComponents.Label {
+                text: lim.title
+                font.weight: Font.DemiBold
             }
-
-            RowLayout {
-                id: head
-                anchors.fill: parent
-                anchors.leftMargin: Kirigami.Units.smallSpacing
-                anchors.rightMargin: Kirigami.Units.smallSpacing
-                spacing: Kirigami.Units.smallSpacing
-
-                Kirigami.Icon {
-                    source: lim.open ? "arrow-down" : "arrow-right"
-                    isMask: true
-                    color: root.dim
-                    Layout.preferredWidth: Kirigami.Units.iconSizes.small
-                    Layout.preferredHeight: Kirigami.Units.iconSizes.small
-                }
-                PlasmaComponents.Label {
-                    Layout.preferredWidth: Kirigami.Units.gridUnit * 4.2
-                    text: lim.title
-                    color: root.dim
-                    font.pointSize: Kirigami.Theme.smallFont.pointSize
-                    font.capitalization: Font.AllUppercase
-                    font.letterSpacing: 1
-                    elide: Text.ElideRight
-                }
-                Bar {
-                    visible: !lim.open
-                    Layout.preferredWidth: Kirigami.Units.gridUnit * 4
-                    pct: lim.pct
-                    fill: lim.accent
-                }
-                PlasmaComponents.Label {
-                    visible: lim.open
-                    Layout.fillWidth: true
-                    text: lim.sub + (lim.win && lim.win.resets_at ? " · resets " + root.moment(lim.key, lim.win.resets_at) : "")
-                    color: root.dim
-                    font.pointSize: Kirigami.Theme.smallFont.pointSize
-                    elide: Text.ElideRight
-                }
-                PlasmaComponents.Label {
-                    text: lim.win ? Math.round(lim.pct) + "%" : "--"
-                    color: lim.accent
-                    font.weight: lim.open ? Font.Bold : Font.DemiBold
-                    font.pointSize: lim.open ? Kirigami.Theme.defaultFont.pointSize * 1.15 : Kirigami.Theme.defaultFont.pointSize
-                }
-                Item {
-                    visible: !lim.open
-                    Layout.fillWidth: true
-                }
-                Chip {
-                    visible: !lim.open && (lim.limited || lim.hits)
-                    tone: lim.eta
-                    text: lim.limited ? "limited" : lim.hits ? "100% in " + root.span(lim.key, lim.win.hits_in) : ""
-                }
-                PlasmaComponents.Label {
-                    visible: !lim.open && !lim.limited && !lim.hits && !!(lim.win && lim.win.resets_at)
-                    text: lim.win ? root.timeLeft(lim.win.resets_at) : ""
-                    color: root.dim
-                    font.pointSize: Kirigami.Theme.smallFont.pointSize
-                }
+            PlasmaComponents.Label {
+                Layout.fillWidth: true
+                text: lim.sub + (lim.win && lim.win.resets_at ? " · resets " + root.moment(lim.key, lim.win.resets_at) : "")
+                color: root.dim
+                font.pointSize: Kirigami.Theme.smallFont.pointSize
+                elide: Text.ElideRight
+            }
+            PlasmaComponents.Label {
+                text: lim.win ? Math.round(lim.pct) + "%" : "--"
+                color: lim.accent
+                font.weight: Font.Bold
+                font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.15
             }
         }
 
-        Item {
-            id: drawer
+        ColumnLayout {
+            id: body
             Layout.fillWidth: true
-            Layout.preferredHeight: lim.open ? body.implicitHeight + Kirigami.Units.smallSpacing * 3 : 0
-            visible: Layout.preferredHeight > 0
-            clip: true
-            Behavior on Layout.preferredHeight {
-                NumberAnimation { duration: Kirigami.Units.longDuration; easing.type: Easing.InOutQuad }
+            Layout.topMargin: Kirigami.Units.largeSpacing
+            Layout.leftMargin: Kirigami.Units.smallSpacing / 2
+            Layout.rightMargin: Kirigami.Units.smallSpacing / 2
+            spacing: Kirigami.Units.smallSpacing
+
+            LimitChart {
+                visible: lim.paced && !!lim.win.resets_at
+                Layout.fillWidth: true
+                Layout.preferredHeight: Kirigami.Units.gridUnit * 4
+                key: lim.key
+                win: lim.win
             }
-
-            ColumnLayout {
-                id: body
-                x: Kirigami.Units.smallSpacing / 2
-                y: Kirigami.Units.smallSpacing
-                width: parent.width - Kirigami.Units.smallSpacing
+            PlasmaComponents.Label {
+                Layout.fillWidth: true
+                visible: text !== ""
+                text: lim.paced ? lim.paceText : lim.win ? "No pace data yet" : "No limit data"
+                textFormat: Text.StyledText
+                color: root.dim
+                font.pointSize: Kirigami.Theme.smallFont.pointSize
+                wrapMode: Text.WordWrap
+            }
+            RowLayout {
+                visible: lim.windowRows.length > 0
+                Layout.fillWidth: true
+                Layout.topMargin: Kirigami.Units.smallSpacing / 2
                 spacing: Kirigami.Units.smallSpacing
-
-                LimitChart {
-                    visible: lim.paced && !!lim.win.resets_at
+                Heading {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: Kirigami.Units.gridUnit * (root.bothOpen ? 4 : 5.5)
-                    key: lim.key
-                    win: lim.win
+                    text: lim.windowTitle
+                    elide: Text.ElideRight
                 }
                 PlasmaComponents.Label {
-                    Layout.fillWidth: true
-                    visible: text !== ""
-                    text: lim.paced ? lim.paceText : lim.win ? "No pace data yet" : "No limit data"
-                    textFormat: Text.StyledText
+                    text: "% of limit · est."
                     color: root.dim
                     font.pointSize: Kirigami.Theme.smallFont.pointSize
-                    wrapMode: Text.WordWrap
                 }
-                RowLayout {
-                    visible: lim.windowRows.length > 0
-                    Layout.fillWidth: true
-                    Layout.topMargin: Kirigami.Units.smallSpacing / 2
-                    spacing: Kirigami.Units.smallSpacing
-                    Heading {
+            }
+            BurnGrid {
+                visible: lim.windowRows.length > 0
+                rows: lim.windowRows
+                peak: lim.windowPeak
+                tone: lim.accent
+                plain: true
+            }
+            RowLayout {
+                visible: lim.windowModels.length > 0
+                Layout.fillWidth: true
+                spacing: 2
+                Repeater {
+                    model: lim.windowModels
+                    delegate: Rectangle {
+                        required property var modelData
+                        required property int index
                         Layout.fillWidth: true
-                        text: lim.windowTitle
-                        elide: Text.ElideRight
+                        Layout.preferredWidth: Math.max(1, modelData.value)
+                        implicitHeight: Kirigami.Units.smallSpacing * 1.25
+                        radius: height / 2
+                        color: root.modelColor(modelData.name)
                     }
-                    PlasmaComponents.Label {
-                        text: "% of limit · est."
+                }
+            }
+            Flow {
+                visible: lim.windowModels.length > 0
+                Layout.fillWidth: true
+                spacing: Kirigami.Units.smallSpacing * 2
+                Repeater {
+                    model: lim.windowModels
+                    delegate: PlasmaComponents.Label {
+                        required property var modelData
+                        required property int index
+                        text: "<font color='" + root.modelColor(modelData.name) + "'>●</font> " + modelData.name + " · " + (modelData.value < 1 ? modelData.value.toFixed(1) : Math.round(modelData.value)) + "%"
+                        textFormat: Text.StyledText
                         color: root.dim
                         font.pointSize: Kirigami.Theme.smallFont.pointSize
                     }
                 }
-                BurnGrid {
-                    visible: lim.windowRows.length > 0
-                    rows: lim.windowRows
-                    peak: lim.windowPeak
-                    tone: lim.accent
-                    plain: true
-                }
-                RowLayout {
-                    visible: lim.windowModels.length > 0
+            }
+            RowLayout {
+                visible: lim.burners.length > 0
+                Layout.fillWidth: true
+                Layout.topMargin: Kirigami.Units.smallSpacing / 2
+                spacing: Kirigami.Units.smallSpacing
+                Heading {
                     Layout.fillWidth: true
-                    spacing: 2
-                    Repeater {
-                        model: lim.windowModels
-                        delegate: Rectangle {
-                            required property var modelData
-                            required property int index
-                            Layout.fillWidth: true
-                            Layout.preferredWidth: Math.max(1, modelData.value)
-                            implicitHeight: Kirigami.Units.smallSpacing * 1.25
-                            radius: height / 2
-                            color: root.modelColor(modelData.name)
-                        }
-                    }
+                    text: lim.burnTitle
+                    elide: Text.ElideRight
                 }
-                Flow {
-                    visible: lim.windowModels.length > 0
-                    Layout.fillWidth: true
-                    spacing: Kirigami.Units.smallSpacing * 2
-                    Repeater {
-                        model: lim.windowModels
-                        delegate: PlasmaComponents.Label {
-                            required property var modelData
-                            required property int index
-                            text: "<font color='" + root.modelColor(modelData.name) + "'>●</font> " + modelData.name + " · " + (modelData.value < 1 ? modelData.value.toFixed(1) : Math.round(modelData.value)) + "%"
-                            textFormat: Text.StyledText
-                            color: root.dim
-                            font.pointSize: Kirigami.Theme.smallFont.pointSize
-                        }
-                    }
+                PlasmaComponents.Label {
+                    text: "% of limit · est."
+                    color: root.dim
+                    font.pointSize: Kirigami.Theme.smallFont.pointSize
                 }
-                RowLayout {
-                    visible: lim.burners.length > 0
-                    Layout.fillWidth: true
-                    Layout.topMargin: Kirigami.Units.smallSpacing / 2
-                    spacing: Kirigami.Units.smallSpacing
-                    Heading {
-                        Layout.fillWidth: true
-                        text: lim.burnTitle
-                        elide: Text.ElideRight
-                    }
-                    PlasmaComponents.Label {
-                        text: "% of limit · est."
-                        color: root.dim
-                        font.pointSize: Kirigami.Theme.smallFont.pointSize
-                    }
-                }
-                BurnGrid {
-                    visible: lim.burners.length > 0
-                    rows: lim.burners
-                    peak: lim.peak
-                    tone: lim.accent
-                }
+            }
+            BurnGrid {
+                visible: lim.burners.length > 0
+                rows: lim.burners
+                peak: lim.peak
+                tone: lim.accent
             }
         }
     }
@@ -2531,10 +2546,6 @@ PlasmoidItem {
 
     onDroopedChanged: {
         if (drooped) {
-            if (atRisk("five_hour", bar && bar.five_hour))
-                setLimitOpen("five_hour", true)
-            if (atRisk("seven_day", bar && bar.seven_day))
-                setLimitOpen("seven_day", true)
             executable.connectSource(root.costCommand)
             droop.visible = true
             droop.requestActivate()
@@ -2706,6 +2717,7 @@ PlasmoidItem {
                             }
                             LimitRow {
                                 key: "seven_day"
+                                separated: true
                                 title: "Weekly"
                                 sub: "7d window"
                                 burnTitle: "Burning this week"
