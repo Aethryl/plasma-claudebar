@@ -1,6 +1,6 @@
 {
     "KPlugin": {
-        "Authors": [{ "Name": "Fabian" }],
+        "Authors": [{ "Name": "Aethryl" }],
         "Category": "System Information",
         "Description": "Claude agent states and usage limits",
         "Icon": "dialog-information",
