@@ -94,7 +94,7 @@ PlasmoidItem {
     readonly property color warning: Kirigami.Theme.neutralTextColor
     readonly property color critical: Kirigami.Theme.negativeTextColor
     readonly property color blocked: Kirigami.Theme.neutralTextColor
-    readonly property color dim: Kirigami.Theme.disabledTextColor
+    readonly property color dim: Qt.alpha(Kirigami.Theme.textColor, 0.7)
     readonly property color active: Kirigami.Theme.activeTextColor
     readonly property color ctxWarn: Qt.tint(Kirigami.Theme.neutralTextColor, Qt.alpha(Kirigami.Theme.negativeTextColor, 0.45))
     readonly property color hairline: Qt.alpha(Kirigami.Theme.textColor, 0.1)
@@ -1350,8 +1350,8 @@ PlasmoidItem {
                                     width: plot.colW
                                     height: chart.cell
                                     color: chart.levels - index <= col.lit
-                                        ? (col.isToday ? Kirigami.Theme.highlightColor : Qt.alpha(Kirigami.Theme.textColor, 0.55))
-                                        : Qt.alpha(Kirigami.Theme.textColor, 0.08)
+                                        ? (col.isToday ? Kirigami.Theme.highlightColor : Qt.alpha(Kirigami.Theme.textColor, 0.85))
+                                        : Qt.alpha(Kirigami.Theme.textColor, 0.12)
                                 }
                             }
                         }
@@ -2081,7 +2081,7 @@ PlasmoidItem {
                     width: Math.max(height, parent.width * modelData.value / grid.peak)
                     height: parent.height
                     radius: height / 2
-                    color: Qt.alpha(grid.tone, 0.7)
+                    color: grid.tone
                 }
             }
         }
@@ -2288,7 +2288,7 @@ PlasmoidItem {
                                 width: Math.max(height, parent.width * modelData.calls / hostBlock.peak)
                                 height: parent.height
                                 radius: height / 2
-                                color: Qt.alpha(Kirigami.Theme.textColor, 0.45)
+                                color: Qt.alpha(Kirigami.Theme.textColor, 0.8)
                             }
                         }
                     }
