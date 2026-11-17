@@ -39,7 +39,10 @@ PROBE_TRUST = 90
 CREATE_TIMEOUT = 10
 SHIM_DIR = os.path.expanduser("~/.config/orca/linux-orca-cli-shim")
 FLEET_STATS = os.path.expanduser(
-    "~/Repos/orca-fleet-stats/plugins/orca-fleet-stats/bin/orca-fleet-stats"
+    os.environ.get(
+        "CLAUDEBAR_FLEET_STATS",
+        "~/Repos/orca-fleet-stats/plugins/orca-fleet-stats/bin/orca-fleet-stats",
+    )
 )
 HOSTS_EVERY = 300
 TITLES_EVERY = 60
