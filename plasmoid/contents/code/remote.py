@@ -58,6 +58,7 @@ MONTH_DAYS = 30
 STATE = {"working": "working", "waiting": "waiting", "blocked": "waiting"}
 SUB_STATE = {"working": "working", "waiting": "waiting", "blocked": "waiting"}
 SPINNER = re.compile(r"^[^\w\s]+\s+")
+HOME_DIR = re.compile(r"^(/home/[^/]+|/Users/[^/]+)/")
 SUBAGENT_PROJECT = re.compile(r"^agent-[0-9a-f]{8,}$")
 
 
@@ -210,20 +211,47 @@ def close_probe(host, handle):
         pass
 
 
-def start_probe(host, worktrees, program, now):
-    """Adopt the host's probe terminal by title, closing extras; create one when there is none."""
-    listed = orca("terminal", "list", "--environment", host)["terminals"]
-    mine = [t for t in listed if PROBE_TITLE in (t.get("title") or "")]
-    for extra in mine[1:]:
-        close_probe(host, extra["handle"])
-    if mine:
-        return {"handle": mine[0]["handle"], "started": now, "fed": 0}
+def probe_workspace(host, worktrees):
+    """Worktree id of the host's dedicated probe folder workspace, registering it when missing."""
+    for tree in worktrees:
+        if tree.get("workspaceKind") == "folder" and tree.get("repo") == PROBE_TITLE:
+            return tree["worktreeId"]
+    home = None
+    for tree in worktrees:
+        found = HOME_DIR.match(tree.get("path") or "")
+        if found:
+            home = found.group(1)
+            break
+    if not home:
+        raise ValueError("no home directory on the host")
+    repo = orca(
+        "repo",
+        "add",
+        "--environment",
+        host,
+        "--kind",
+        "folder",
+        "--path",
+        f"{home}/.cache/{PROBE_TITLE}",
+    )["repo"]
+    return f"{repo['id']}::{repo['path']}"
+
+
+def make_probe_dir(host, worktrees, workspace):
+    """Create the workspace folder with a throwaway terminal in an existing workspace, since the CLI has no mkdir."""
+    path = workspace.split("::", 1)[1]
     trees = sorted(
-        (w for w in worktrees if w.get("worktreeId") and not w.get("isArchived")),
+        (
+            w
+            for w in worktrees
+            if w.get("workspaceKind") == "git"
+            and w.get("worktreeId")
+            and not w.get("isArchived")
+        ),
         key=lambda w: not w.get("isMainWorktree"),
     )
     if not trees:
-        raise ValueError("no worktree to open the probe in")
+        raise ValueError("no worktree to create the probe folder from")
     made = orca(
         "terminal",
         "create",
@@ -231,13 +259,60 @@ def start_probe(host, worktrees, program, now):
         host,
         "--worktree",
         f"id:{trees[0]['worktreeId']}",
+        "--command",
+        f"mkdir -p '{path}' && exit",
+        timeout=CREATE_TIMEOUT,
+    )
+    time.sleep(2)
+    close_probe(host, made["terminal"]["handle"])
+
+
+def create_probe(host, worktrees, workspace, program):
+    args = (
+        "terminal",
+        "create",
+        "--environment",
+        host,
+        "--worktree",
+        f"id:{workspace}",
         "--title",
         PROBE_TITLE,
         "--command",
         program,
-        timeout=CREATE_TIMEOUT,
     )
-    return {"handle": made["terminal"]["handle"], "started": now, "fed": now}
+    try:
+        return orca(*args, timeout=CREATE_TIMEOUT)
+    except ValueError:
+        make_probe_dir(host, worktrees, workspace)
+        return orca(*args, timeout=CREATE_TIMEOUT)
+
+
+def start_probe(host, worktrees, program, now):
+    """Adopt the probe terminal in the probe workspace, closing extras and strays; create one when there is none."""
+    workspace = probe_workspace(host, worktrees)
+    listed = orca("terminal", "list", "--environment", host)["terminals"]
+    mine = []
+    for term in listed:
+        if PROBE_TITLE not in (term.get("title") or ""):
+            continue
+        if term.get("worktreeId") == workspace and not mine:
+            mine.append(term)
+        else:
+            close_probe(host, term["handle"])
+    if mine:
+        return {
+            "handle": mine[0]["handle"],
+            "workspace": workspace,
+            "started": now,
+            "fed": 0,
+        }
+    made = create_probe(host, worktrees, workspace, program)
+    return {
+        "handle": made["terminal"]["handle"],
+        "workspace": workspace,
+        "started": now,
+        "fed": now,
+    }
 
 
 def read_probe(host, entry):
@@ -272,6 +347,8 @@ def probe(host, worktrees, entry, program, version, now):
     """Keep one probe terminal on the host alive and return its latest snapshot by pane."""
     entry = dict(entry)
     try:
+        if entry.get("handle") and not entry.get("workspace"):
+            close_probe(host, entry.pop("handle"))
         if not entry.get("handle"):
             entry.update(start_probe(host, worktrees, program, now), cursor=None)
         data = read_probe(host, entry)
