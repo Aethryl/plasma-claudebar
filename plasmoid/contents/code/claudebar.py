@@ -14,6 +14,9 @@ from datetime import datetime, timedelta
 
 LIMITS_CACHE = os.path.expanduser("~/.cache/claude-bar/limits.json")
 STALE_AFTER = 15 * 60
+RATEPOLL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ratepoll.py")
+RATEPOLL_STAMP = os.path.expanduser("~/.cache/claude-bar/ratepoll.stamp")
+RATEPOLL_EVERY = 120
 PACE = {
     "five_hour": ("~/.cache/claude-bar/pace.json", 5 * 3600, 30 * 60, 5 * 60, 3600),
     "seven_day": (
@@ -638,7 +641,32 @@ def pace(win, key, now):
     )
 
 
+def poll_limits():
+    now = time.time()
+    try:
+        if now - os.stat(RATEPOLL_STAMP).st_mtime < RATEPOLL_EVERY:
+            return
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return
+    try:
+        os.makedirs(os.path.dirname(RATEPOLL_STAMP), exist_ok=True)
+        with open(RATEPOLL_STAMP, "w"):
+            pass
+        subprocess.Popen(
+            [sys.executable, RATEPOLL],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        return
+
+
 def limits():
+    poll_limits()
     try:
         with open(LIMITS_CACHE) as f:
             cache = json.load(f)
