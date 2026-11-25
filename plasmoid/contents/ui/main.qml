@@ -1340,8 +1340,14 @@ PlasmoidItem {
                         readonly property bool isToday: index === chart.days.length - 1
                         readonly property bool monday: date.getDay() === 1
                         readonly property real lead: chart.mondayGap && monday && index > 0 ? plot.extra : 0
+                        readonly property bool clashesWithToday: chart.labelMode !== "letters" && !isToday && x + lead + dayLabel.implicitWidth + Kirigami.Units.smallSpacing > plotRow.width - todayText.advanceWidth
                         width: plot.colW + lead
                         implicitHeight: chart.plotHeight + chart.gap + dayLabel.implicitHeight
+                        TextMetrics {
+                            id: todayText
+                            font: dayLabel.font
+                            text: chart.days.length ? new Date(chart.days[chart.days.length - 1].day + "T12:00:00").toLocaleString(Qt.locale(), "d MMM") : ""
+                        }
                         height: implicitHeight
                         Column {
                             x: col.lead
@@ -1361,7 +1367,7 @@ PlasmoidItem {
                             id: dayLabel
                             x: col.lead + (chart.labelMode === "letters" ? (plot.colW - implicitWidth) / 2 : (col.isToday ? plot.colW - implicitWidth : 0))
                             y: chart.plotHeight + chart.gap
-                            visible: chart.labelMode === "letters" || col.monday || col.isToday
+                            visible: chart.labelMode === "letters" || col.isToday || col.monday && !col.clashesWithToday
                             text: chart.labelMode === "letters" ? col.date.toLocaleString(Qt.locale(), "ddd").slice(0, 1) : col.date.toLocaleString(Qt.locale(), "d MMM")
                             color: col.isToday ? Kirigami.Theme.highlightColor : root.dim
                             font.pointSize: Kirigami.Theme.smallFont.pointSize * 0.85
