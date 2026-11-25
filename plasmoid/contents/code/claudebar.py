@@ -44,6 +44,13 @@ DONE_FOR = 10 * 60
 FAILED_FOR = 30 * 60
 ORDER = ["waiting", "error", "working", "delegating", "done", "idle"]
 ROW_STATE = {"working": "working", "blocked": "waiting"}
+ORCA_STATE = {
+    "working": "working",
+    "blocked": "blocked",
+    "waiting": "blocked",
+    "done": "idle",
+}
+ORCA_STALE = 30
 SETTINGS_FILE = os.path.expanduser("~/.config/claude-bar/settings.json")
 REMOTE_LIVE = os.path.expanduser("~/.cache/claude-bar/remote.json")
 REMOTE_FLEET = os.path.expanduser("~/.cache/claude-bar/fleet.json")
@@ -98,7 +105,7 @@ def contexts(panes):
     return found
 
 
-def hooked():
+def hooked(scrape=True):
     """Sessions the agent-presence hook records (Orca, a plain terminal)."""
     found = []
     try:
@@ -131,8 +138,50 @@ def hooked():
                 "cwd": entry.get("cwd"),
                 "terminal_id": f"ext:{session}",
                 "host": entry.get("host"),
-                "handle": entry.get("terminal") or orca_handle(pid),
+                "handle": entry.get("terminal")
+                or (orca_handle(pid) if scrape else None),
                 "pid": pid,
+            }
+        )
+    return found
+
+
+def orca_agents(live, now):
+    """Local Orca agents with a running process, paired with their Claude session by cwd; None when Orca does not answer."""
+    listed = bots.agent_list(stale=ORCA_STALE)
+    trees = bots.worktree_ps(stale=ORCA_STALE)
+    if listed is None or trees is None:
+        return None
+    seen = {
+        agent.get("orcaSessionId"): (tree.get("path") or "", agent)
+        for tree in trees.get("worktrees") or []
+        for agent in tree.get("agents") or []
+    }
+    by_cwd = {}
+    for entry in live:
+        if entry.get("cwd"):
+            by_cwd.setdefault(entry["cwd"], []).append(entry)
+    found = []
+    for agent in listed.get("agents") or []:
+        cwd, detail = seen.get(agent.get("orcaSessionId"), ("", {}))
+        if not (
+            detail.get("structuredHostOwned")
+            or detail.get("hasLivePty")
+            or agent.get("state") in bots.ACTIVE
+        ):
+            continue
+        state = (detail.get("mainAgent") or {}).get("state") or agent.get("state")
+        session = (by_cwd.get(cwd) or [{}]).pop(0)
+        sid = session.get("sessionId")
+        found.append(
+            {
+                "pane_id": f"session-{sid}" if sid else None,
+                "agent_status": ORCA_STATE.get(state, "idle"),
+                "cwd": cwd,
+                "terminal_id": f"ext:{sid or agent['orcaSessionId']}",
+                "host": agent.get("kind") or "orca",
+                "pid": session.get("pid"),
+                "subagents": bots.native_subagents(detail, now),
             }
         )
     return found
@@ -433,10 +482,25 @@ def remote_stats(now):
     return found
 
 
-def fleet(rows):
-    """Orchestrators (sessions, hook rows, remote Orca hosts) with their subagents and totals."""
+def delegating(status, subs):
+    if status == "idle" and any(s["status"] in ("working", "waiting") for s in subs):
+        return "delegating"
+    return status
+
+
+def native(subs, records):
+    """Orca's subagents, with the question the agent-presence hook saw them ask."""
+    for sub in subs:
+        sub["ask"] = str((records.get(sub["id"]) or {}).get("ask") or "")
+    return subs
+
+
+def fleet(rows, natives, live):
+    """Orchestrators (sessions, agent rows, remote Orca hosts) with their subagents and totals.
+
+    Subagents come from Orca where it observes them live, else from the session's transcripts.
+    """
     now = time.time()
-    live = sessions()
     records = subagent_records({s["sessionId"] for s in live})
     by_pid = {r["pid"]: r for r in rows if r.get("pid")}
     claimed = set()
@@ -456,16 +520,27 @@ def fleet(rows):
             status = ROW_STATE.get(row.get("status"), "idle")
         else:
             status = "working" if entry.get("status") == "busy" else "idle"
-        subs = subagents(entry["sessionId"], cwd, records, now)
-        if status == "idle" and any(
-            s["status"] in ("working", "waiting") for s in subs
-        ):
-            status = "delegating"
-        found.append((status, cwd, str(entry.get("name") or ""), row or {}, subs))
+        subs = natives.get((row or {}).get("terminal_id"))
+        if subs is None:
+            subs = subagents(entry["sessionId"], cwd, records, now)
+        else:
+            subs = native(subs, records)
+        found.append(
+            (
+                delegating(status, subs),
+                cwd,
+                str(entry.get("name") or ""),
+                row or {},
+                subs,
+            )
+        )
     for row in rows:
         if id(row) not in claimed:
             status = ROW_STATE.get(row.get("status"), "idle")
-            found.append((status, row.get("cwd") or "", "", row, []))
+            subs = native(natives.get(row.get("terminal_id")) or [], records)
+            found.append(
+                (delegating(status, subs), row.get("cwd") or "", "", row, subs)
+            )
     orchestrators = dict.fromkeys(("working", "delegating", "waiting", "idle"), 0)
     totals = dict.fromkeys(("working", "waiting", "error", "done"), 0)
     projects = []
@@ -509,10 +584,27 @@ def fleet(rows):
     }
 
 
-def agents():
-    listed = hooked()
+def agents(live):
+    """Agent rows (Orca first, hook records for the rest) and Orca's subagents by terminal_id."""
+    listed = orca_agents(live, time.time())
+    hooks = hooked(scrape=listed is None)
+    if listed is None:
+        listed = hooks
+    else:
+        handles = {h["pid"]: h.get("handle") for h in hooks if h.get("pid")}
+        for agent in listed:
+            agent["handle"] = handles.get(agent.get("pid"))
+        taken = {a["pid"] for a in listed if a.get("pid")} | {
+            s.get("pid") for s in live if s.get("entrypoint") == "orca"
+        }
+        listed += [h for h in hooks if h.get("pid") not in taken]
+    natives = {
+        a["terminal_id"]: a["subagents"]
+        for a in listed
+        if a.get("subagents") is not None
+    }
     if not listed:
-        return None
+        return None, natives
     ctx = contexts({a.get("pane_id") for a in listed})
     counts = {"working": 0, "blocked": 0, "idle": 0}
     rows = []
@@ -544,7 +636,7 @@ def agents():
             str(a["name"] or a["cwd"]).lower(),
         )
     )
-    return {**counts, "list": rows}
+    return {**counts, "list": rows}, natives
 
 
 def window(rate_limits, key):
@@ -720,7 +812,8 @@ def save(key, raw):
 if len(sys.argv) == 4 and sys.argv[1] == "set":
     save(sys.argv[2], sys.argv[3])
 else:
-    found = agents()
+    live = sessions()
+    found, natives = agents(live)
     print(
         json.dumps(
             {
@@ -731,7 +824,9 @@ else:
                         w
                         for a in (found or {}).get("list", [])
                         for w in [a, *a.get("workers", [])]
-                    ]
+                    ],
+                    natives,
+                    live,
                 ),
                 **limits(),
                 "settings": settings(),

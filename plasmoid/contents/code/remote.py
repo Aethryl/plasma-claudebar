@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Cache agents and 7-day stats of remote Orca hosts for claudebar.py to read.
 
-`remote.py live` lists agents per Orca environment (one `worktree ps` per host) and reads the
-host's probe terminal, which runs probe.py there and reports subagents from the transcripts.
+`remote.py live` lists agents per Orca environment (one `worktree ps` per host), with the
+subagents Orca observes on chats. Only while a host runs Claude in a plain terminal pane does it
+keep a probe terminal there, which runs probe.py and reports those subagents from the transcripts.
 `remote.py stop` closes the probe terminals.
 `remote.py fleet` runs orca-fleet-stats per environment, at most once per FLEET_EVERY.
 """
@@ -21,6 +22,8 @@ import time
 import zlib
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
+
+import bots
 
 CACHE_DIR = os.path.expanduser("~/.cache/claude-bar")
 LIVE = os.path.join(CACHE_DIR, "remote.json")
@@ -56,7 +59,6 @@ MAX_COST_ROWS = 12
 WEEK_DAYS = 7
 MONTH_DAYS = 30
 STATE = {"working": "working", "waiting": "waiting", "blocked": "waiting"}
-SUB_STATE = {"working": "working", "waiting": "waiting", "blocked": "waiting"}
 SPINNER = re.compile(r"^[^\w\s]+\s+")
 HOME_DIR = re.compile(r"^(/home/[^/]+|/Users/[^/]+)/")
 SUBAGENT_PROJECT = re.compile(r"^agent-[0-9a-f]{8,}$")
@@ -136,39 +138,16 @@ def titles(host, panes, cache):
     return known
 
 
-def subagent(sub, now):
-    status = SUB_STATE.get(sub.get("state"), "done" if sub.get("state") else None)
-    if status is None:
-        return None
-    started = (sub.get("startedAt") or 0) / 1000 or None
-    return {
-        "id": sub.get("id") or "",
-        "type": sub.get("agentType"),
-        "model": None,
-        "description": "subagent",
-        "status": status,
-        "need": "",
-        "tool": "",
-        "ask": "",
-        "started_at": started,
-        "updated_at": now,
-    }
-
-
 def projects(host, worktrees, names, probed, now):
     found = []
     for tree in worktrees:
         for agent in tree.get("agents") or []:
             pane = agent.get("paneKey") or ""
             seen = probed.get(pane)
-            if seen is not None:
-                subs = (seen.get("subagents") or [])[:MAX_SUBAGENTS]
-            else:
-                subs = [
-                    s
-                    for s in (subagent(s, now) for s in agent.get("subagents") or [])
-                    if s
-                ][:MAX_SUBAGENTS]
+            subs = bots.native_subagents(agent, now)
+            if subs is None:
+                subs = (seen or {}).get("subagents") or []
+            subs = subs[:MAX_SUBAGENTS]
             status = STATE.get(agent.get("state"), "idle")
             if status == "idle" and any(
                 s["status"] in ("working", "waiting") for s in subs
@@ -384,13 +363,28 @@ def probed(entry, now):
     return {s.get("pane"): s for s in entry.get("snapshot") or [] if s.get("pane")}
 
 
+def terminal_run(worktrees):
+    """Whether a live Claude runs in a plain terminal pane, whose subagents only the probe can read."""
+    return any(
+        agent.get("agentType") == "claude"
+        and agent.get("subagentObservation") != "live"
+        and agent.get("hasLivePty")
+        for tree in worktrees
+        for agent in tree.get("agents") or []
+    )
+
+
 def poll(host, previous, cache, entry, program, version):
     now = time.time()
     try:
         worktrees = orca("worktree", "ps", "--environment", host)["worktrees"]
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
         return {**previous, "ok": False, "failed_at": now}, entry
-    entry = probe(host, worktrees, entry, program, version, now)
+    if terminal_run(worktrees):
+        entry = probe(host, worktrees, entry, program, version, now)
+    elif entry.get("handle"):
+        close_probe(host, entry["handle"])
+        entry = {}
     panes = {a.get("paneKey") or "" for w in worktrees for a in (w.get("agents") or [])}
     names = titles(host, panes, cache) if panes else {}
     return {

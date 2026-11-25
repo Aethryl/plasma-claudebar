@@ -15,18 +15,25 @@ CALL_TIMEOUT = 8
 ACTIVE = ("working", "blocked", "waiting")
 SESSION_ID = re.compile(r"\b[0-9a-f]{8}\b")
 PATH = re.compile(r"/home/[\w./-]+")
+SUB_STATE = {"working": "working", "blocked": "waiting", "waiting": "waiting"}
+SUB_ORDER = ["waiting", "working"]
 
 
 def orca_bin():
     return ORCA if os.path.exists(ORCA) else "orca"
 
 
-def call(args, host, ttl):
-    """Run an orca CLI call returning JSON, reusing a cached answer younger than ttl."""
+def call(args, host, ttl, stale=None):
+    """Run an orca CLI call returning JSON, reusing a cached answer younger than ttl.
+
+    When the call fails, the cached answer stands in if it is younger than stale (any age when None).
+    """
     key = re.sub(r"[^\w]+", "_", f"{host or 'local'}_{'_'.join(args)}")
     path = os.path.join(CACHE, key + ".json")
+    age = None
     try:
-        if time.time() - os.path.getmtime(path) < ttl:
+        age = time.time() - os.path.getmtime(path)
+        if age < ttl:
             with open(path) as f:
                 return json.load(f)
     except (OSError, ValueError):
@@ -42,6 +49,8 @@ def call(args, host, ttl):
     except (OSError, subprocess.SubprocessError, ValueError):
         data = None
     if not data or not data.get("ok"):
+        if stale is not None and (age is None or age > stale):
+            return None
         try:
             with open(path) as f:
                 return json.load(f)
@@ -57,6 +66,60 @@ def call(args, host, ttl):
     except OSError:
         pass
     return result
+
+
+def agent_list(host=None, stale=None):
+    return call(["agent", "list"], host, REMOTE_TTL if host else LOCAL_TTL, stale)
+
+
+def worktree_ps(host=None, stale=None):
+    return call(
+        ["worktree", "ps", "--since", "2d"],
+        host,
+        REMOTE_TTL if host else LOCAL_TTL,
+        stale,
+    )
+
+
+def native_subagents(agent, now):
+    """Subagents Orca observes on an agent, in claudebar's row shape; None when it cannot observe them."""
+    if agent.get("subagentObservation") != "live":
+        return None
+    found = []
+    for child in agent.get("children") or []:
+        status = SUB_STATE.get(child.get("state"))
+        if (
+            child.get("kind") == "command"
+            or status is None
+            or child.get("membership", "live") != "live"
+        ):
+            continue
+        seen = (child.get("observedAt") or 0) / 1000
+        tool = str((child.get("operation") or {}).get("toolName") or "")
+        need = ""
+        if status == "waiting":
+            need = "question" if tool == "AskUserQuestion" else "permission"
+        started = (child.get("firstObservedAt") or 0) / 1000
+        found.append(
+            (
+                SUB_ORDER.index(status),
+                -started,
+                {
+                    "id": child.get("providerId") or child.get("id") or "",
+                    "type": child.get("agentType") or child.get("name"),
+                    "model": child.get("model"),
+                    "description": str(child.get("description") or ""),
+                    "status": status,
+                    "need": need,
+                    "tool": tool if status in ("working", "waiting") else "",
+                    "ask": "",
+                    "started_at": started or None,
+                    "updated_at": seen or now,
+                },
+            )
+        )
+    found.sort(key=lambda f: f[:2])
+    return [f[2] for f in found]
 
 
 def live_subagents(agent):
@@ -80,10 +143,9 @@ def question_text(question):
 
 
 def host_view(host):
-    ttl = REMOTE_TTL if host else LOCAL_TTL
-    agents = call(["agent", "list"], host, ttl) or {}
-    trees = call(["worktree", "ps", "--since", "2d"], host, ttl) or {}
-    paths, branches, owners, subs = {}, {}, {}, {}
+    agents = agent_list(host) or {}
+    trees = worktree_ps(host) or {}
+    paths, branches, owners, subs, homes = {}, {}, {}, {}, {}
     for tree in trees.get("worktrees") or []:
         paths[tree["worktreeId"]] = tree.get("path") or ""
         branches[tree["worktreeId"]] = (tree.get("branch") or "").replace(
@@ -95,7 +157,9 @@ def host_view(host):
                 subs[sid] = live_subagents(agent)
                 if tree.get("bot"):
                     owners[sid] = tree["bot"]
-    return agents.get("agents") or [], paths, branches, owners, subs
+                    if tree.get("botHome"):
+                        homes[sid] = tree["bot"]
+    return agents.get("agents") or [], paths, branches, owners, subs, homes
 
 
 def link(agent, bot_names, owners, descriptions, paths):
@@ -133,15 +197,13 @@ def collect():
         items = {n: f.result() or {} for n, f in items.items()}
     out, other = [], []
     for host in hosts:
-        agents, paths, branches, owners, subs = views[host]
+        agents, paths, branches, owners, subs, home_bots = views[host]
         mine = [b for b in bots if b.get("server", {}).get("on") == host]
         mine_names = {b["name"] for b in mine}
         homes = {
-            a["workspace"]: a
+            home_bots[a["orcaSessionId"]]: a
             for a in agents
-            if a.get("kind") == "chat"
-            and str(a.get("worktreeId", "")).startswith("folder:")
-            and a.get("workspace") in mine_names
+            if home_bots.get(a["orcaSessionId"]) in mine_names
         }
         home_ids = {a["orcaSessionId"] for a in homes.values()}
         descriptions = {
