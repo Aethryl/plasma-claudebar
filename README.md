@@ -2,7 +2,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/panel-dark.png">
-  <img src="docs/screenshots/panel-light.png" alt="Claude Bar panel with demo agent counts and rate limits" width="440">
+  <img src="docs/screenshots/panel-light.png" alt="Claude Bar panel with demo agent counts and rate limits" width="710">
 </picture>
 
 A Plasma 6 panel widget for Claude Code. It centres itself on the screen and shows herdr agent counts as block stacks alongside the five-hour and weekly rate limits. Open the notch for the agent list, limit details and an estimated cost at API prices.
