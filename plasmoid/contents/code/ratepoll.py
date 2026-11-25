@@ -17,6 +17,7 @@ PACE7_CACHE = os.path.join(CACHE_DIR, "pace-7d.json")
 LOCK = os.path.join(CACHE_DIR, "ratepoll.lock")
 KINDS = {"session": "five_hour", "weekly_all": "seven_day"}
 TIMEOUT = 30
+SAME_WINDOW = 60
 
 
 def write_json(target, payload):
@@ -24,6 +25,13 @@ def write_json(target, payload):
     with open(tmp, "w") as f:
         json.dump(payload, f)
     os.replace(tmp, target)
+
+
+def compare_window(new, old):
+    """1 when new opens a later window, -1 when it is stale, 0 for the same window."""
+    if not old or new - old > SAME_WINDOW:
+        return 1
+    return -1 if old - new > SAME_WINDOW else 0
 
 
 def fetch():
@@ -78,8 +86,14 @@ def store_limits(found):
             cache = {}
         merged = cache.get("rate_limits") or {}
         for key, window in found.items():
-            if window["resets_at"] >= ((merged.get(key) or {}).get("resets_at") or 0):
+            old = merged.get(key) or {}
+            order = compare_window(window["resets_at"], old.get("resets_at"))
+            if order > 0:
                 merged[key] = window
+            elif order == 0 and window["used_percentage"] >= (
+                old.get("used_percentage") or 0
+            ):
+                merged[key] = {**window, "resets_at": old["resets_at"]}
         write_json(LIMITS_CACHE, {"updated_at": time.time(), "rate_limits": merged})
 
 
@@ -92,13 +106,15 @@ def record_pace(pct, resets_at, path, min_gap):
                 pace = json.load(f)
         except (OSError, ValueError):
             pace = {}
-        if pace.get("resets_at") != resets_at:
-            if resets_at < (pace.get("resets_at") or 0):
-                return
+        order = compare_window(resets_at, pace.get("resets_at"))
+        if order < 0:
+            return
+        if order > 0:
             pace = {"resets_at": resets_at, "samples": []}
-        samples = pace["samples"]
+        samples = sorted(pace.get("samples") or [])
         if not samples or (now - samples[-1][0] >= min_gap and pct >= samples[-1][1]):
-            samples.append([now, pct])
+            samples = [s for s in samples if s[0] != now] + [[now, pct]]
+            pace["samples"] = samples
             write_json(path, pace)
 
 
@@ -114,8 +130,8 @@ def main():
             return
         store_limits(found)
         for key, path, gap in (
-            ("five_hour", PACE_CACHE, 60),
-            ("seven_day", PACE7_CACHE, 900),
+            ("five_hour", PACE_CACHE, 0),
+            ("seven_day", PACE7_CACHE, 0),
         ):
             if key in found:
                 record_pace(

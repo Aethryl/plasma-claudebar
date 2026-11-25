@@ -1,6 +1,6 @@
 # plasma-claudebar
 
-Claude Code at a glance, as a Plasma 6 panel widget: herdr agent counts as block stacks, 5-hour and weekly limits, and a notch with limits, an API-price cost estimate and the agent list. It centres itself on the screen.
+Claude Code at a glance, as a Plasma 6 panel widget: Orca bots (working, blocked on you, idle) with their agent and subagent counts, 5-hour and weekly limits, and a notch with limits, an API-price cost estimate and the agent list. It centres itself on the screen.
 
 ## Install
 
@@ -17,7 +17,7 @@ gdbus call --session -d org.kde.plasmashell -o /PlasmaShell \
 ## Requirements
 
 - Plasma 6 (tested on 6.7.5)
-- herdr at `~/.local/bin/herdr` for agent counts
+- Orca with bots (`orca` CLI at `~/.config/orca/linux-orca-cli-shim/orca`) for the bot and agent display
 - Claude Code with a statusline that merges `rate_limits` into `~/.cache/claude-bar/limits.json`, keeping the higher `used_percentage` per window under a file lock (see below)
 
 Claudebar is built around one setup and reads fixed locations:
@@ -25,7 +25,7 @@ Claudebar is built around one setup and reads fixed locations:
 - Orca CLI state in `~/.config/orca/` (`orchestration.db`, `linux-orca-cli-shim`)
 - Claude Code transcripts in `~/.claude/sessions` and `~/.claude/projects`
 - its own cache in `~/.cache/claude-bar/` and settings in `~/.config/claude-bar/settings.json`
-- herdr at `~/.local/bin/herdr` and the `claude` binary on `PATH` or at `~/.local/bin/claude`
+- the `claude` binary on `PATH` or at `~/.local/bin/claude`
 - optional: [orca-fleet-stats](https://github.com/Aethryl/orca-fleet-stats) for remote host stats, found at `~/Repos/orca-fleet-stats/plugins/orca-fleet-stats/bin/orca-fleet-stats` or `$CLAUDEBAR_FLEET_STATS`
 
 ## Statusline hook

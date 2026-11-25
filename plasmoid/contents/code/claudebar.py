@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Emit one JSON line with Claude agent counts (herdr and elsewhere) and rate limits."""
+"""Emit one JSON line with Claude agent counts, Orca bots and rate limits."""
 
 import glob
 import json
@@ -11,6 +11,8 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
+
+import bots
 
 LIMITS_CACHE = os.path.expanduser("~/.cache/claude-bar/limits.json")
 STALE_AFTER = 15 * 60
@@ -28,7 +30,6 @@ PACE = {
     ),
 }
 BURN_SPAN = {"five_hour": 30 * 60, "seven_day": 7 * 86400}
-HERDR = os.path.expanduser("~/.local/bin/herdr")
 CONTEXT_DIR = os.path.expanduser("~/.cache/claude-bar/context")
 CONTEXT_MAX_AGE = 6 * 3600
 AGENTS_DIR = os.path.expanduser("~/.cache/claude-bar/agents")
@@ -72,30 +73,6 @@ DEFAULTS = {
 }
 
 
-def herdr(*args):
-    out = subprocess.run(
-        [HERDR, *args], check=False, capture_output=True, text=True, timeout=3
-    )
-    return json.loads(out.stdout)["result"]
-
-
-def labels():
-    try:
-        workspaces = {
-            w["workspace_id"]: w.get("label") or ""
-            for w in herdr("workspace", "list")["workspaces"]
-        }
-        tabs = herdr("tab", "list")["tabs"]
-    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
-        return {}, {}
-    named_tabs = {
-        t["tab_id"]: t["label"]
-        for t in tabs
-        if t.get("label") and not str(t["label"]).isdigit()
-    }
-    return workspaces, named_tabs
-
-
 def contexts(panes):
     found = {}
     try:
@@ -121,8 +98,8 @@ def contexts(panes):
     return found
 
 
-def outside_herdr():
-    """Sessions the agent-presence hook records outside herdr (Orca, a plain terminal)."""
+def hooked():
+    """Sessions the agent-presence hook records (Orca, a plain terminal)."""
     found = []
     try:
         names = os.listdir(AGENTS_DIR)
@@ -457,7 +434,7 @@ def remote_stats(now):
 
 
 def fleet(rows):
-    """Orchestrators (sessions, herdr panes, hook rows, remote Orca hosts) with their subagents and totals."""
+    """Orchestrators (sessions, hook rows, remote Orca hosts) with their subagents and totals."""
     now = time.time()
     live = sessions()
     records = subagent_records({s["sessionId"] for s in live})
@@ -533,15 +510,9 @@ def fleet(rows):
 
 
 def agents():
-    try:
-        listed = herdr("agent", "list")["agents"]
-    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
-        listed = None
-    outside = outside_herdr()
-    if listed is None and not outside:
+    listed = hooked()
+    if not listed:
         return None
-    listed = (listed or []) + outside
-    workspaces, named_tabs = labels()
     ctx = contexts({a.get("pane_id") for a in listed})
     counts = {"working": 0, "blocked": 0, "idle": 0}
     rows = []
@@ -554,14 +525,7 @@ def agents():
         row = {
             "status": status,
             "cwd": cwd,
-            "name": " · ".join(
-                part
-                for part in (
-                    workspaces.get(agent.get("workspace_id")),
-                    named_tabs.get(agent.get("tab_id")),
-                )
-                if part
-            ),
+            "name": str(entry.get("name") or os.path.basename(cwd.rstrip("/"))),
             "terminal_id": agent.get("terminal_id"),
             "ctx": entry.get("pct"),
             "focused": agent.get("focused", False),
@@ -609,7 +573,9 @@ def pace(win, key, now):
     start = resets_at - length
     stored = read_json(os.path.expanduser(path)) or {}
     samples = (
-        stored.get("samples") or [] if stored.get("resets_at") == resets_at else []
+        stored.get("samples") or []
+        if abs((stored.get("resets_at") or 0) - resets_at) <= 60
+        else []
     )
     samples = [s for s in samples if start <= s[0] <= now]
     recent = [s for s in samples if now - s[0] <= span]
@@ -722,6 +688,13 @@ def music():
     return "Playing" in out.stdout.split()
 
 
+def bot_view():
+    try:
+        return bots.collect()
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def settings():
     try:
         with open(SETTINGS_FILE) as f:
@@ -752,6 +725,7 @@ else:
         json.dumps(
             {
                 "agents": found,
+                "bots": bot_view(),
                 "fleet": fleet(
                     [
                         w

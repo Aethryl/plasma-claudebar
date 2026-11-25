@@ -29,7 +29,6 @@ PlasmoidItem {
     property real compactWidth: Kirigami.Units.gridUnit * 20
     property Item compactItem: null
     property bool drooped: false
-    property bool showIdle: false
 
     readonly property real ear: Kirigami.Units.gridUnit * 0.7
     readonly property real bottomRadius: Kirigami.Units.gridUnit * 1.1
@@ -37,12 +36,12 @@ PlasmoidItem {
     readonly property var agents: bar && bar.agents ? bar.agents : null
     readonly property var everyAgent: agents ? agents.list.reduce((all, a) => all.concat([a], a.workers || []), []) : []
     readonly property var fleet: bar && bar.fleet ? bar.fleet : null
-    readonly property var projects: fleet ? fleet.projects : []
-    readonly property var quietProjects: projects.filter(p => p.status === "idle" && p.subagents.length === 0)
-    readonly property var shownProjects: showIdle ? projects : projects.filter(p => !quietProjects.includes(p))
-    readonly property var orchCells: projects.map(p => ({ status: p.status, ctx: p.ctx }))
-    readonly property var subCells: projects.reduce((all, p) => all.concat(p.subagents.map(s => ({ status: s.status, ctx: null }))), [])
-    readonly property var stateOrder: ["waiting", "error", "working", "delegating", "done", "idle"]
+    readonly property var botData: bar && bar.bots ? bar.bots : null
+    readonly property var botList: botData ? botData.bots : []
+    readonly property var activeBots: botList.filter(b => b.state !== "idle")
+    readonly property var idleBots: botList.filter(b => b.state === "idle")
+    readonly property var botTotals: botData ? botData.totals : ({ working: 0, blocked: 0, idle: 0, agents: 0, subagents: 0, needs: 0 })
+    readonly property int subagentGuess: fleet ? fleet.subagents.working + fleet.subagents.waiting : 0
     readonly property bool windowed: Plasmoid.formFactor === PlasmaCore.Types.Planar || Plasmoid.location === PlasmaCore.Types.Floating
     property var pendingSettings: ({})
     readonly property var settings: Object.assign({ warn: 70, critical: 85, notify: true, playful: false, outfits: "auto", outfit_fav: "pirate", outfit_events: true, outfit_seasons: true, outfit_wallpaper: true, outfit_random: true }, bar && bar.settings ? bar.settings : {}, pendingSettings)
@@ -157,12 +156,8 @@ PlasmoidItem {
         return status === "working" ? ok : status === "waiting" ? blocked : status === "error" ? critical : status === "delegating" || status === "done" ? active : dim
     }
 
-    function bucket(cells, states) {
-        return cells.filter(c => states.includes(c.status)).sort((a, b) => stateOrder.indexOf(a.status) - stateOrder.indexOf(b.status))
-    }
-
-    function worstOf(project) {
-        return [project.status].concat(project.subagents.map(s => s.status)).sort((a, b) => stateOrder.indexOf(a) - stateOrder.indexOf(b))[0]
+    function botColor(state) {
+        return state === "working" ? ok : state === "blocked" ? blocked : dim
     }
 
     function minutes(since) {
@@ -218,9 +213,9 @@ PlasmoidItem {
     }
 
     function focusAgent(terminalId) {
-        if (String(terminalId).startsWith("ext:"))
+        if (!String(terminalId).startsWith("worktree:"))
             return
-        executable.connectSource("\"$HOME/.local/bin/herdr\" agent focus " + terminalId)
+        executable.connectSource("\"$HOME/.config/orca/linux-orca-cli-shim/orca\" worktree activate --worktree 'id:" + String(terminalId).slice(9) + "'")
         root.drooped = false
     }
 
@@ -1168,108 +1163,115 @@ PlasmoidItem {
         }
     }
 
-    component Throb: QtObject {
-        id: throbber
-        property bool beating: false
-        property real value: 1
-        SequentialAnimation on value {
-            running: throbber.beating && Kirigami.Units.longDuration > 0
-            loops: Animation.Infinite
-            NumberAnimation { to: 0.25; duration: 700; easing.type: Easing.InOutQuad }
-            NumberAnimation { to: 1; duration: 700; easing.type: Easing.InOutQuad }
-        }
-    }
-
-    component StateMark: Rectangle {
-        id: mark
-        property string status
-        readonly property real dpr: Screen.devicePixelRatio || 1
-        color: status === "delegating" || status === "done" ? "transparent" : root.stateColor(status)
-        border.width: status === "done" ? Math.max(1, Math.round(dpr)) / dpr : 0
-        border.color: root.active
-        opacity: status === "waiting" ? throb.value : 1
-        Stripes {
-            anchors.fill: parent
-            visible: mark.status === "delegating"
-        }
-        Throb {
-            id: throb
-            beating: mark.status === "waiting" && mark.visible
-        }
-    }
-
-    component Stack: Item {
-        id: stack
-        property var cells: []
-        property color tint
-        property int columns: 2
-        property int rows: 2
-        property real share: 0.2
-        readonly property real dpr: Screen.devicePixelRatio || 1
-        readonly property real cell: Math.max(2, Math.round(Kirigami.Units.gridUnit * share * dpr)) / dpr
-        readonly property real gap: Math.max(1, Math.round(dpr)) / dpr
-        readonly property int overflow: Math.max(0, cells.length - columns * rows)
-        implicitWidth: grid.width + (more.visible ? gap * 2 + more.implicitWidth : 0)
-        implicitHeight: rows * cell + rows * gap + tab.height
+    component Dot: Rectangle {
+        property string kind
+        readonly property real size: Kirigami.Units.gridUnit * 0.5
+        implicitWidth: size
+        implicitHeight: size
+        radius: size / 2
         Layout.alignment: Qt.AlignVCenter
+        color: kind === "idle" ? "transparent" : root.botColor(kind)
+        border.width: kind === "idle" ? 1 : 0
+        border.color: root.dim
+    }
 
-        Grid {
-            id: grid
-            columns: stack.columns
-            spacing: stack.gap
-            Repeater {
-                model: stack.columns * stack.rows
-                Rectangle {
-                    id: slotCell
-                    readonly property int slot: (stack.rows - 1 - Math.floor(index / stack.columns)) * stack.columns + index % stack.columns
-                    readonly property var entry: slot < stack.cells.length ? stack.cells[slot] : null
-                    readonly property string status: entry ? entry.status : ""
-                    width: stack.cell
-                    height: stack.cell
-                    color: !entry ? Qt.alpha(stack.tint, 0.18)
-                        : status === "delegating" ? "transparent"
-                        : root.levelColor(root.ctxLevel(entry.ctx), root.stateColor(status))
-                    opacity: status === "waiting" ? throb.value : 1
-                    Stripes {
-                        anchors.fill: parent
-                        visible: slotCell.status === "delegating"
-                    }
-                    Throb {
-                        id: throb
-                        beating: slotCell.status === "waiting" && stack.visible
-                    }
-                }
+    component Badge: Rectangle {
+        property int value
+        implicitWidth: Math.max(implicitHeight, badgeLabel.implicitWidth + Kirigami.Units.smallSpacing * 2)
+        implicitHeight: badgeLabel.implicitHeight
+        radius: height / 2
+        color: root.blocked
+        Layout.alignment: Qt.AlignVCenter
+        PlasmaComponents.Label {
+            id: badgeLabel
+            anchors.centerIn: parent
+            text: parent.value
+            color: Kirigami.Theme.backgroundColor
+            font.pointSize: Kirigami.Theme.smallFont.pointSize * 0.9
+            font.weight: Font.DemiBold
+        }
+    }
+
+    component BotChip: Rectangle {
+        id: chip
+        property var bot
+        readonly property bool waiting: bot.state === "blocked"
+        readonly property int running: bot.agents.filter(a => a.state === "working").length
+        implicitWidth: chipRow.implicitWidth + Kirigami.Units.largeSpacing
+        implicitHeight: chipRow.implicitHeight + Kirigami.Units.smallSpacing
+        radius: height / 2
+        color: Qt.alpha(Kirigami.Theme.textColor, 0.08)
+        border.width: waiting ? 1 : 0
+        border.color: root.blocked
+        Layout.alignment: Qt.AlignVCenter
+        RowLayout {
+            id: chipRow
+            anchors.centerIn: parent
+            spacing: Kirigami.Units.smallSpacing
+            Dot { kind: chip.bot.state }
+            PlasmaComponents.Label {
+                text: chip.bot.name
+                font.pointSize: Kirigami.Theme.smallFont.pointSize
+            }
+            PlasmaComponents.Label {
+                visible: chip.running > 0
+                text: chip.running
+                color: root.dim
+                font.pointSize: Kirigami.Theme.smallFont.pointSize
+            }
+            Badge { visible: chip.waiting; value: chip.bot.needs.length }
+        }
+    }
+
+    component IdleChip: Rectangle {
+        implicitWidth: idleRow.implicitWidth + Kirigami.Units.largeSpacing
+        implicitHeight: idleRow.implicitHeight + Kirigami.Units.smallSpacing
+        radius: height / 2
+        color: Qt.alpha(Kirigami.Theme.textColor, 0.08)
+        Layout.alignment: Qt.AlignVCenter
+        RowLayout {
+            id: idleRow
+            anchors.centerIn: parent
+            spacing: Kirigami.Units.smallSpacing
+            Dot { kind: "idle" }
+            PlasmaComponents.Label {
+                text: root.idleBots.length
+                color: root.dim
+                font.pointSize: Kirigami.Theme.smallFont.pointSize
             }
         }
-        Rectangle {
-            id: tab
-            anchors.bottom: parent.bottom
-            width: grid.width
-            height: Math.max(2, Math.round(Kirigami.Units.smallSpacing / 2 * stack.dpr)) / stack.dpr
-            color: stack.tint
-        }
-        PlasmaComponents.Label {
-            id: more
-            visible: stack.overflow > 0
-            x: grid.width + stack.gap * 2
-            anchors.verticalCenter: grid.verticalCenter
-            text: "+" + stack.overflow
-            color: root.dim
-            font.pointSize: Kirigami.Theme.smallFont.pointSize * 0.85
+        HoverHandler { id: idleHover }
+        PlasmaComponents.ToolTip {
+            visible: idleHover.hovered
+            text: root.idleBots.map(b => b.name).join(", ") + " idle"
         }
     }
 
-    component Tier: RowLayout {
-        id: tier
-        property var cells: []
-        property int columns: 2
-        property int rows: 2
-        property real share: 0.2
-        readonly property var attention: root.bucket(cells, ["waiting", "error"])
+    component AgentTotal: RowLayout {
+        readonly property int busy: root.botTotals.subagents_working || 0
         spacing: Kirigami.Units.smallSpacing
-        Stack { cells: root.bucket(tier.cells, ["working", "delegating"]); tint: root.ok; columns: tier.columns; rows: tier.rows; share: tier.share }
-        Stack { cells: tier.attention; tint: tier.attention.length && tier.attention[0].status === "error" ? root.critical : root.blocked; columns: tier.columns; rows: tier.rows; share: tier.share }
-        Stack { cells: root.bucket(tier.cells, ["done", "idle"]); tint: root.dim; columns: tier.columns; rows: tier.rows; share: tier.share }
+        opacity: busy > 0 ? 1 : 0.4
+        Layout.alignment: Qt.AlignVCenter
+        Rectangle {
+            Layout.preferredWidth: Kirigami.Units.gridUnit * 0.4
+            Layout.preferredHeight: Kirigami.Units.gridUnit * 0.4
+            Layout.alignment: Qt.AlignVCenter
+            rotation: 45
+            color: busy > 0 ? Kirigami.Theme.textColor : "transparent"
+            border.width: 1
+            border.color: busy > 0 ? Kirigami.Theme.textColor : root.dim
+        }
+        PlasmaComponents.Label {
+            visible: busy > 0
+            text: busy
+            font.pointSize: Kirigami.Theme.smallFont.pointSize
+            font.weight: Font.DemiBold
+        }
+        HoverHandler { id: totalHover }
+        PlasmaComponents.ToolTip {
+            visible: totalHover.hovered
+            text: busy + " subagents working · " + root.botTotals.agents + " agents, " + root.botTotals.subagents + " live subagents in total"
+        }
     }
 
     component DayChart: RowLayout {
@@ -2116,75 +2118,205 @@ PlasmoidItem {
         font.letterSpacing: 1
     }
 
-    component Totals: GridLayout {
-        id: totals
-        readonly property var orch: root.fleet ? root.fleet.orchestrators : ({ working: 0, delegating: 0, waiting: 0, idle: 0, total: 0 })
-        readonly property var subs: root.fleet ? root.fleet.subagents : ({ working: 0, waiting: 0, error: 0, done: 0, total: 0 })
-        readonly property real glyph: Kirigami.Units.gridUnit * 0.4
-        columns: 5
-        rowSpacing: Kirigami.Units.smallSpacing
-        columnSpacing: Kirigami.Units.gridUnit
-
-        Item { Layout.fillWidth: true }
-        Heading { Layout.alignment: Qt.AlignRight; text: "running" }
-        Heading { Layout.alignment: Qt.AlignRight; text: "needs you" }
-        Heading { Layout.alignment: Qt.AlignRight; text: "idle" }
-        Heading { Layout.alignment: Qt.AlignRight; text: "total" }
-
+    component AgentRow: Rectangle {
+        id: agentRow
+        property var agent
+        implicitHeight: agentLine.implicitHeight + Kirigami.Units.smallSpacing
+        radius: Kirigami.Units.cornerRadius
+        color: agentHover.hovered && agent.worktree && !agent.host ? Qt.alpha(Kirigami.Theme.textColor, 0.08) : "transparent"
         RowLayout {
-            Layout.fillWidth: true
-            spacing: Kirigami.Units.smallSpacing * 1.5
-            Item {
-                Layout.preferredWidth: totals.glyph
-                Layout.preferredHeight: totals.glyph
-                Rectangle {
-                    anchors.centerIn: parent
-                    width: parent.width * 0.75
-                    height: width
-                    rotation: 45
-                    color: totals.orch.total - totals.orch.idle > 0 ? Kirigami.Theme.textColor : "transparent"
-                    border.width: 1
-                    border.color: totals.orch.total - totals.orch.idle > 0 ? Kirigami.Theme.textColor : root.dim
-                }
-            }
-            PlasmaComponents.Label { text: "orchestrators" }
-        }
-        RowLayout {
-            Layout.alignment: Qt.AlignRight
+            id: agentLine
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.margins: Kirigami.Units.smallSpacing
             spacing: Kirigami.Units.smallSpacing
+            Dot { kind: agentRow.agent.state === "working" ? "working" : agentRow.agent.state === "done" ? "idle" : "blocked" }
             PlasmaComponents.Label {
-                visible: totals.orch.delegating > 0
-                text: totals.orch.delegating + " delegating"
+                Layout.fillWidth: true
+                text: agentRow.agent.title
+                elide: Text.ElideRight
+            }
+            PlasmaComponents.Label {
+                text: agentRow.agent.repo + (agentRow.agent.branch ? " · " + agentRow.agent.branch : "")
+                color: root.dim
+                font.pointSize: Kirigami.Theme.smallFont.pointSize
+                elide: Text.ElideMiddle
+                Layout.maximumWidth: Kirigami.Units.gridUnit * 9
+            }
+            PlasmaComponents.Label {
+                visible: agentRow.agent.subagents > 0
+                text: "+" + agentRow.agent.subagents
                 color: root.active
                 font.pointSize: Kirigami.Theme.smallFont.pointSize
             }
-            Tally { value: totals.orch.working + totals.orch.delegating; tone: root.ok }
         }
-        Tally { value: totals.orch.waiting; tone: root.blocked }
-        Tally { value: totals.orch.idle; tone: root.dim }
-        Tally { value: totals.orch.total; font.weight: Font.DemiBold }
+        HoverHandler { id: agentHover; cursorShape: agentRow.agent.worktree && !agentRow.agent.host ? Qt.PointingHandCursor : Qt.ArrowCursor }
+        TapHandler { enabled: !!agentRow.agent.worktree && !agentRow.agent.host; onTapped: root.focusAgent("worktree:" + agentRow.agent.worktree) }
+    }
 
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: Kirigami.Units.smallSpacing * 1.5
-            Grid {
-                columns: 2
-                spacing: 1
-                Repeater {
-                    model: 4
-                    Rectangle {
-                        width: Kirigami.Units.gridUnit * 0.17
-                        height: width
-                        color: root.ok
+    component BotCard: Rectangle {
+        id: card
+        property var bot
+        implicitHeight: cardColumn.implicitHeight + Kirigami.Units.largeSpacing
+        radius: Kirigami.Units.cornerRadius
+        color: Qt.alpha(Kirigami.Theme.textColor, 0.05)
+        border.width: bot.state === "blocked" ? 1 : 0
+        border.color: root.blocked
+        ColumnLayout {
+            id: cardColumn
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.margins: Kirigami.Units.smallSpacing
+            spacing: Kirigami.Units.smallSpacing
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Kirigami.Units.smallSpacing
+                Dot { kind: card.bot.state }
+                PlasmaComponents.Label {
+                    text: card.bot.name
+                    font.weight: Font.DemiBold
+                }
+                HostTag { visible: !!card.bot.host; host: card.bot.host }
+                Item { Layout.fillWidth: true }
+                PlasmaComponents.Label {
+                    text: card.bot.agents.length + (card.bot.agents.length === 1 ? " agent" : " agents") + (card.bot.subagents ? " · +" + card.bot.subagents : "")
+                    color: root.dim
+                    font.pointSize: Kirigami.Theme.smallFont.pointSize
+                }
+            }
+            Repeater {
+                model: card.bot.progress.slice(0, 3)
+                PlasmaComponents.Label {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: Kirigami.Units.gridUnit * 0.8
+                    text: "▸ " + modelData
+                    color: root.dim
+                    font.pointSize: Kirigami.Theme.smallFont.pointSize
+                    elide: Text.ElideRight
+                }
+            }
+            Repeater {
+                model: card.bot.agents
+                AgentRow { Layout.fillWidth: true; agent: modelData }
+            }
+        }
+    }
+
+    component TotalCell: RowLayout {
+        property var cell
+        readonly property bool numeric: cell.col > 0
+        Layout.fillWidth: !numeric
+        Layout.alignment: numeric ? Qt.AlignRight | Qt.AlignVCenter : Qt.AlignLeft | Qt.AlignVCenter
+        spacing: Kirigami.Units.smallSpacing
+        Dot { visible: !numeric && !!cell.kind; kind: cell.kind || "idle" }
+        PlasmaComponents.Label {
+            Layout.fillWidth: !numeric
+            horizontalAlignment: numeric ? Text.AlignRight : Text.AlignLeft
+            text: cell.text
+            elide: Text.ElideRight
+            color: cell.head || cell.dim ? root.dim : Kirigami.Theme.textColor
+            font.pointSize: cell.head ? Kirigami.Theme.smallFont.pointSize : Kirigami.Theme.defaultFont.pointSize
+            font.weight: cell.strong ? Font.DemiBold : Font.Normal
+            font.features: ({ "tnum": 1 })
+        }
+    }
+
+    component BotsPanel: ColumnLayout {
+        id: panel
+        spacing: Kirigami.Units.largeSpacing
+        readonly property var totalCells: {
+            const row = (kind, name, agents, subs, extra) => [
+                Object.assign({ col: 0, kind: kind, text: name }, extra),
+                Object.assign({ col: 1, text: String(agents) }, extra),
+                Object.assign({ col: 2, text: String(subs) }, extra)
+            ]
+            const other = root.botData ? root.botData.other : []
+            return [].concat(
+                row("", "", "agents", "subagents", { head: true }),
+                root.botList.reduce((all, b) => all.concat(row(b.state, b.name, b.agents.length, b.subagents, {})), []),
+                row("", "Other (no bot)", other.length, other.reduce((n, a) => n + a.subagents, 0), { dim: true }),
+                row("", "Total", root.botTotals.agents, root.botTotals.subagents, { strong: true })
+            )
+        }
+
+        Heading { text: "Needs you" }
+        PlasmaComponents.Label {
+            visible: root.botTotals.needs === 0
+            text: root.botData ? "Nothing waits on you" : "Orca not reachable"
+            color: root.dim
+        }
+        Repeater {
+            model: root.botList.reduce((all, b) => all.concat(b.needs.map(n => Object.assign({ bot: b.name }, n))), [])
+            Rectangle {
+                id: needRow
+                Layout.fillWidth: true
+                implicitHeight: needColumn.implicitHeight + Kirigami.Units.largeSpacing
+                radius: Kirigami.Units.cornerRadius
+                color: Qt.alpha(root.blocked, 0.12)
+                ColumnLayout {
+                    id: needColumn
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.margins: Kirigami.Units.smallSpacing
+                    spacing: 0
+                    RowLayout {
+                        spacing: Kirigami.Units.smallSpacing
+                        Dot { kind: "blocked" }
+                        PlasmaComponents.Label { text: modelData.bot; font.weight: Font.DemiBold }
+                        PlasmaComponents.Label {
+                            Layout.fillWidth: true
+                            text: "#" + modelData.number + " " + modelData.title
+                            elide: Text.ElideRight
+                        }
+                    }
+                    PlasmaComponents.Label {
+                        visible: !!modelData.question
+                        Layout.fillWidth: true
+                        text: modelData.question
+                        color: root.dim
+                        font.pointSize: Kirigami.Theme.smallFont.pointSize
+                        wrapMode: Text.Wrap
+                        maximumLineCount: 2
+                        elide: Text.ElideRight
                     }
                 }
             }
-            PlasmaComponents.Label { text: "subagents" }
         }
-        Tally { value: totals.subs.working; tone: root.ok }
-        Tally { value: totals.subs.waiting + totals.subs.error; tone: totals.subs.waiting ? root.blocked : root.critical }
-        Tally { value: totals.subs.done; tone: root.dim }
-        Tally { value: totals.subs.total; font.weight: Font.DemiBold }
+
+        Heading { text: "Totals · " + root.botTotals.working + " working, " + root.botTotals.blocked + " blocked, " + root.botTotals.idle + " idle" }
+        GridLayout {
+            Layout.fillWidth: true
+            columns: 3
+            columnSpacing: Kirigami.Units.gridUnit
+            rowSpacing: Kirigami.Units.smallSpacing
+            Repeater {
+                model: panel.totalCells
+                TotalCell { cell: modelData }
+            }
+        }
+        PlasmaComponents.Label {
+            visible: root.subagentGuess > root.botTotals.subagents
+            Layout.fillWidth: true
+            text: "Estimate from transcripts: " + root.subagentGuess + " running subagents, not counted"
+            color: root.dim
+            font.pointSize: Kirigami.Theme.smallFont.pointSize
+            wrapMode: Text.Wrap
+        }
+
+        Heading { visible: root.botList.length > 0; text: "Bots" }
+        Repeater {
+            model: root.botList
+            BotCard { Layout.fillWidth: true; bot: modelData }
+        }
+
+        Heading { visible: !!root.botData && root.botData.other.length > 0; text: "Other agents" }
+        Repeater {
+            model: root.botData ? root.botData.other : []
+            AgentRow { Layout.fillWidth: true; agent: modelData }
+        }
     }
 
     component HostTag: Rectangle {
@@ -2310,171 +2442,6 @@ PlasmoidItem {
         }
     }
 
-    component SubRow: Rectangle {
-        id: subRow
-        property var sub
-        readonly property string need: sub.status === "waiting" ? (sub.need === "question" ? "asks you" : "wants " + (sub.tool || "permission"))
-            : sub.status === "error" ? "failed"
-            : sub.status === "done" ? "done"
-            : ""
-        Layout.fillWidth: true
-        implicitHeight: Kirigami.Units.gridUnit * 1.25
-        radius: Kirigami.Units.cornerRadius
-        color: sub.status === "waiting" ? Qt.alpha(root.blocked, 0.14) : sub.status === "error" ? Qt.alpha(root.critical, 0.12) : "transparent"
-
-        RowLayout {
-            anchors.fill: parent
-            anchors.leftMargin: Kirigami.Units.smallSpacing
-            anchors.rightMargin: Kirigami.Units.smallSpacing
-            spacing: Kirigami.Units.smallSpacing * 1.5
-
-            StateMark {
-                status: subRow.sub.status
-                Layout.preferredWidth: Kirigami.Units.gridUnit * 0.4
-                Layout.preferredHeight: Kirigami.Units.gridUnit * 0.4
-            }
-            PlasmaComponents.Label {
-                Layout.fillWidth: true
-                text: subRow.sub.description
-                elide: Text.ElideRight
-                font.pointSize: Kirigami.Theme.smallFont.pointSize
-            }
-            PlasmaComponents.Label {
-                visible: subRow.need === "" && subRow.sub.status === "working" && !!subRow.sub.tool
-                text: subRow.sub.tool || ""
-                color: root.dim
-                font.pointSize: Kirigami.Theme.smallFont.pointSize * 0.85
-            }
-            PlasmaComponents.Label {
-                visible: subRow.need !== ""
-                text: subRow.need
-                color: root.stateColor(subRow.sub.status)
-                font.pointSize: Kirigami.Theme.smallFont.pointSize
-            }
-            Rectangle {
-                Layout.preferredWidth: tag.implicitWidth + Kirigami.Units.smallSpacing * 2
-                Layout.preferredHeight: tag.implicitHeight
-                radius: Kirigami.Units.cornerRadius
-                color: "transparent"
-                border.width: 1
-                border.color: root.hairline
-                PlasmaComponents.Label {
-                    id: tag
-                    anchors.centerIn: parent
-                    text: (subRow.sub.type === "general-purpose" ? "agent" : subRow.sub.type || "agent") + (subRow.sub.model ? " · " + subRow.sub.model : "")
-                    color: root.dim
-                    font.pointSize: Kirigami.Theme.smallFont.pointSize * 0.85
-                }
-            }
-            PlasmaComponents.Label {
-                text: root.minutes(subRow.sub.started_at)
-                color: root.dim
-                horizontalAlignment: Text.AlignRight
-                font.pointSize: Kirigami.Theme.smallFont.pointSize
-                Layout.minimumWidth: Kirigami.Units.gridUnit * 1.4
-            }
-        }
-    }
-
-    component ProjectCard: Rectangle {
-        id: card
-        property var project
-        readonly property string worst: root.worstOf(project)
-        readonly property int running: project.subagents.filter(s => s.status === "working" || s.status === "waiting").length
-        readonly property string level: root.ctxLevel(project.ctx)
-        Layout.fillWidth: true
-        implicitHeight: body.implicitHeight + Kirigami.Units.smallSpacing * 4
-        radius: Kirigami.Units.cornerRadius * 2
-        color: hover.containsMouse ? Qt.alpha(Kirigami.Theme.highlightColor, 0.2) : Qt.alpha(Kirigami.Theme.textColor, 0.06)
-        border.width: worst === "waiting" || worst === "error" ? 1 : 0
-        border.color: Qt.alpha(worst === "error" ? root.critical : root.blocked, 0.55)
-
-        MouseArea {
-            id: hover
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: card.project.host ? Qt.ArrowCursor : Qt.PointingHandCursor
-            onClicked: root.focusAgent(card.project.terminal_id)
-        }
-
-        ColumnLayout {
-            id: body
-            anchors.fill: parent
-            anchors.margins: Kirigami.Units.smallSpacing * 2
-            spacing: Kirigami.Units.smallSpacing
-
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: Kirigami.Units.smallSpacing * 1.5
-                StateMark {
-                    status: card.project.status
-                    radius: 1
-                    Layout.preferredWidth: Kirigami.Units.gridUnit * 0.3
-                    Layout.preferredHeight: Kirigami.Units.gridUnit * 0.75
-                }
-                PlasmaComponents.Label {
-                    text: card.project.name
-                    font.weight: Font.Bold
-                    elide: Text.ElideRight
-                    Layout.maximumWidth: card.width * 0.4
-                }
-                HostTag {
-                    visible: !!card.project.host
-                    host: card.project.host || ""
-                    stale: !!card.project.stale
-                }
-                PlasmaComponents.Label {
-                    text: card.project.status === "waiting" ? "asks you"
-                        : card.project.status === "delegating" ? "delegating · " + card.running + (card.running === 1 ? " subagent" : " subagents")
-                        : card.project.status
-                    color: card.project.status === "idle" ? root.dim : root.stateColor(card.project.status)
-                    font.pointSize: Kirigami.Theme.smallFont.pointSize
-                }
-                PlasmaComponents.Label {
-                    Layout.fillWidth: true
-                    text: card.project.session
-                    color: root.dim
-                    elide: Text.ElideRight
-                    font.pointSize: Kirigami.Theme.smallFont.pointSize
-                }
-                PlasmaComponents.Label {
-                    visible: card.project.ctx !== null && card.project.ctx !== undefined
-                    text: Math.round(card.project.ctx) + "%"
-                    color: root.levelColor(card.level, root.dim)
-                    font.family: "monospace"
-                    font.weight: card.level ? Font.DemiBold : Font.Normal
-                    font.pointSize: Kirigami.Theme.smallFont.pointSize
-                }
-                PlasmaComponents.Label {
-                    visible: card.project.subagents.length > 0
-                    text: card.project.subagents.length + " sub"
-                    color: root.dim
-                    font.pointSize: Kirigami.Theme.smallFont.pointSize
-                }
-            }
-
-            RowLayout {
-                visible: card.project.subagents.length > 0
-                Layout.fillWidth: true
-                Layout.leftMargin: Kirigami.Units.smallSpacing / 2
-                spacing: Kirigami.Units.smallSpacing * 1.5
-                Rectangle {
-                    Layout.fillHeight: true
-                    Layout.preferredWidth: 1
-                    color: root.hairline
-                }
-                ColumnLayout {
-                    Layout.fillWidth: true
-                    spacing: 0
-                    Repeater {
-                        model: card.project.subagents.slice(0, 12)
-                        SubRow { sub: modelData }
-                    }
-                }
-            }
-        }
-    }
-
     compactRepresentation: Item {
         id: holder
         Layout.minimumWidth: row.implicitWidth
@@ -2517,15 +2484,19 @@ PlasmoidItem {
                 }
 
                 RowLayout {
-                    spacing: Kirigami.Units.largeSpacing
-                    Tier { cells: root.orchCells; columns: 2; rows: 2; share: 0.2 }
-                    Rectangle {
-                        Layout.preferredWidth: 1
-                        Layout.preferredHeight: Kirigami.Units.gridUnit * 0.9
-                        Layout.alignment: Qt.AlignVCenter
-                        color: Qt.alpha(Kirigami.Theme.textColor, 0.2)
+                    spacing: Kirigami.Units.smallSpacing
+                    PlasmaComponents.Label {
+                        visible: !root.botData
+                        text: "bots n/a"
+                        color: root.dim
+                        font.pointSize: Kirigami.Theme.smallFont.pointSize
                     }
-                    Tier { cells: root.subCells; columns: 4; rows: 4; share: 0.15 }
+                    Repeater {
+                        model: root.activeBots
+                        BotChip { bot: modelData }
+                    }
+                    IdleChip { visible: root.idleBots.length > 0 }
+                    AgentTotal { visible: !!root.botData }
                 }
                 Pip {}
                 Meter { label: "5h"; win: root.bar ? root.bar.five_hour : null }
@@ -2635,41 +2606,15 @@ PlasmoidItem {
 
                         ColumnLayout {
                             id: agentsColumn
-                            visible: root.projects.length > 0 || !root.agents
                             Layout.preferredWidth: Kirigami.Units.gridUnit * 24
                             Layout.fillWidth: true
                             Layout.alignment: Qt.AlignTop
                             spacing: Kirigami.Units.largeSpacing
 
-                            PlasmaComponents.Label {
-                                visible: !root.agents && root.projects.length === 0
-                                text: "herdr not reachable"
-                                color: root.dim
-                            }
-                            PlasmaComponents.Label {
-                                visible: root.projects.length > 0 && root.projects.length === root.quietProjects.length && !root.showIdle
-                                text: "No agents running"
-                                color: root.dim
-                            }
-
-                            Totals {
-                                id: totalsBlock
-                                visible: root.projects.length > 0
-                                Layout.fillWidth: true
-                            }
-
-                            Heading {
-                                id: perProject
-                                visible: root.shownProjects.length > 0
-                                text: "Per project"
-                            }
-
                             Flickable {
                                 id: cardScroll
-                                readonly property real cap: Math.max(Kirigami.Units.gridUnit * 6, notch.maxContent - (totalsBlock.visible ? totalsBlock.implicitHeight : 0) - perProject.implicitHeight - Kirigami.Units.largeSpacing * 2)
-                                visible: root.shownProjects.length > 0
                                 Layout.fillWidth: true
-                                Layout.preferredHeight: Math.min(cardList.implicitHeight, cap)
+                                Layout.preferredHeight: Math.min(cardList.implicitHeight, Math.max(Kirigami.Units.gridUnit * 6, notch.maxContent))
                                 contentWidth: width
                                 contentHeight: cardList.implicitHeight
                                 interactive: contentHeight > height
@@ -2680,14 +2625,9 @@ PlasmoidItem {
                                     policy: cardScroll.interactive ? PlasmaComponents.ScrollBar.AsNeeded : PlasmaComponents.ScrollBar.AlwaysOff
                                 }
 
-                                ColumnLayout {
+                                BotsPanel {
                                     id: cardList
                                     width: cardScroll.width - (cardScroll.interactive ? cardBar.width + Kirigami.Units.smallSpacing : 0)
-                                    spacing: Kirigami.Units.smallSpacing
-                                    Repeater {
-                                        model: root.shownProjects.slice(0, 40)
-                                        ProjectCard { project: modelData }
-                                    }
                                 }
                             }
                         }
@@ -2768,19 +2708,6 @@ PlasmoidItem {
                         id: footer
                         Layout.fillWidth: true
                         spacing: Kirigami.Units.smallSpacing
-                        PlasmaComponents.Label {
-                            visible: root.quietProjects.length > 0
-                            text: (root.showIdle ? "Hide " : "Show ") + root.quietProjects.length + " idle"
-                            color: idleHover.containsMouse ? Kirigami.Theme.textColor : root.dim
-                            font.pointSize: Kirigami.Theme.smallFont.pointSize
-                            MouseArea {
-                                id: idleHover
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: root.showIdle = !root.showIdle
-                            }
-                        }
                         Item { Layout.fillWidth: true }
                         Kirigami.Icon {
                             source: "configure"
